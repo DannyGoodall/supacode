@@ -15,7 +15,7 @@ import SupacodeSettingsShared
 /// Runtime-only classification — never persisted (only the root path is
 /// persisted), so adding a case requires no migration. The flavor flips
 /// freely on reload as a directory is (un)initialized as git/jj.
-nonisolated enum RepositoryVCS: String, Hashable, Sendable, Codable {
+nonisolated enum RepositoryVCS: Hashable, Sendable {
   case git
   case gitColocatedJJ
   case folder

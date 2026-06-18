@@ -3755,7 +3755,7 @@ struct RepositoriesFeature {
     }
     // Cheap filesystem probe, skipped entirely when the experimental setting
     // is off so the default path is unchanged.
-    let isColocatedJJ = jjIntegrationEnabled && (await gitClient.isColocatedJJRepository(root))
+    let isColocatedJJ = jjIntegrationEnabled ? await gitClient.isColocatedJJRepository(root) : false
     do {
       let worktrees = try await gitClient.worktrees(root)
       return WorktreesFetchResult(

@@ -118,7 +118,7 @@ struct RepositoryJJColocationTests {
     #expect(repo.isGitRepository)
   }
 
-  /// The load-bearing backward-compat guarantee (report point 8): a
+  /// The load-bearing backward-compat guarantee: a
   /// colocated repo still answers `isGitRepository == true`, so every
   /// existing git/none consumer keeps treating it as a git repo.
   @Test func colocatedFlavorStillReportsAsGitRepository() {
