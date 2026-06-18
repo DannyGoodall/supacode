@@ -3713,6 +3713,69 @@ struct RepositoriesFeature {
     let errorMessage: String?
   }
 
+  /// Classifies a single root off the main actor for the concurrent load.
+  /// Extracted from `loadRepositoriesData` so that function stays within the
+  /// body-length limit; takes the git client explicitly so it stays
+  /// `nonisolated` and Sendable-safe inside the task group.
+  nonisolated private static func classifyRoot(
+    _ root: URL,
+    jjIntegrationEnabled: Bool,
+    gitClient: GitClientDependency
+  ) async -> WorktreesFetchResult {
+    // Directory-existence check first — if the root is gone (user trashed it
+    // from Finder while Supacode was running, external tooling removed it, the
+    // volume is unmounted), surface a load failure so the sidebar shows the
+    // error row. Otherwise `gitClient.isGitRepository` returns `false` for the
+    // missing path and the loader silently synthesizes an empty folder
+    // repository, which hides the real problem from the user. Routed through
+    // the dependency so tests with fake `/tmp/...` paths don't trip the check.
+    let exists = await gitClient.rootDirectoryExists(root)
+    guard exists else {
+      return WorktreesFetchResult(
+        root: root,
+        isGitRepository: false,
+        isColocatedJJ: false,
+        worktrees: nil,
+        errorMessage:
+          "Directory not found at \(root.standardizedFileURL.path(percentEncoded: false)). "
+          + "It may have been moved or deleted."
+      )
+    }
+    // Classify through the git client so tests can override without touching
+    // the filesystem — non-git folders skip the worktrees subprocess entirely.
+    let isGit = await gitClient.isGitRepository(root)
+    guard isGit else {
+      return WorktreesFetchResult(
+        root: root,
+        isGitRepository: false,
+        isColocatedJJ: false,
+        worktrees: [],
+        errorMessage: nil
+      )
+    }
+    // Cheap filesystem probe, skipped entirely when the experimental setting
+    // is off so the default path is unchanged.
+    let isColocatedJJ = jjIntegrationEnabled && (await gitClient.isColocatedJJRepository(root))
+    do {
+      let worktrees = try await gitClient.worktrees(root)
+      return WorktreesFetchResult(
+        root: root,
+        isGitRepository: true,
+        isColocatedJJ: isColocatedJJ,
+        worktrees: worktrees,
+        errorMessage: nil
+      )
+    } catch {
+      return WorktreesFetchResult(
+        root: root,
+        isGitRepository: true,
+        isColocatedJJ: isColocatedJJ,
+        worktrees: nil,
+        errorMessage: error.localizedDescription
+      )
+    }
+  }
+
   private func loadRepositoriesData(_ roots: [URL]) async -> ([Repository], [LoadFailure]) {
     // Read the experimental gate once, up front, and capture the plain
     // Bool into the `@Sendable` task closures below. When off, no root
@@ -3724,63 +3787,11 @@ struct RepositoriesFeature {
       for root in roots {
         let gitClient = self.gitClient
         group.addTask {
-          // Directory-existence check first — if the root is gone
-          // (user trashed it from Finder while Supacode was
-          // running, external tooling removed it, the volume is
-          // unmounted), surface a load failure so the sidebar
-          // shows the error row. Otherwise `gitClient.isGitRepository`
-          // returns `false` for the missing path and the loader
-          // silently synthesizes an empty folder repository, which
-          // hides the real problem from the user. Routed through
-          // the dependency so tests with fake `/tmp/...` paths
-          // don't trip the check — they override it explicitly.
-          let exists = await gitClient.rootDirectoryExists(root)
-          guard exists else {
-            return WorktreesFetchResult(
-              root: root,
-              isGitRepository: false,
-              isColocatedJJ: false,
-              worktrees: nil,
-              errorMessage:
-                "Directory not found at \(root.standardizedFileURL.path(percentEncoded: false)). "
-                + "It may have been moved or deleted."
-            )
-          }
-          // Classify through the git client so tests can override
-          // without touching the filesystem — non-git folders skip
-          // the worktrees subprocess entirely.
-          let isGit = await gitClient.isGitRepository(root)
-          guard isGit else {
-            return WorktreesFetchResult(
-              root: root,
-              isGitRepository: false,
-              isColocatedJJ: false,
-              worktrees: [],
-              errorMessage: nil
-            )
-          }
-          // Cheap filesystem probe, skipped entirely when the
-          // experimental setting is off so the default path is
-          // unchanged.
-          let isColocatedJJ = jjIntegrationEnabled && (await gitClient.isColocatedJJRepository(root))
-          do {
-            let worktrees = try await gitClient.worktrees(root)
-            return WorktreesFetchResult(
-              root: root,
-              isGitRepository: true,
-              isColocatedJJ: isColocatedJJ,
-              worktrees: worktrees,
-              errorMessage: nil
-            )
-          } catch {
-            return WorktreesFetchResult(
-              root: root,
-              isGitRepository: true,
-              isColocatedJJ: isColocatedJJ,
-              worktrees: nil,
-              errorMessage: error.localizedDescription
-            )
-          }
+          await Self.classifyRoot(
+            root,
+            jjIntegrationEnabled: jjIntegrationEnabled,
+            gitClient: gitClient
+          )
         }
       }
 
