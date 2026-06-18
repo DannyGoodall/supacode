@@ -3705,11 +3705,21 @@ struct RepositoriesFeature {
   private struct WorktreesFetchResult: Sendable {
     let root: URL
     let isGitRepository: Bool
+    // Only ever `true` when the experimental jj integration setting is
+    // on AND the root is a colocated git+jj repo. Drives the
+    // `.gitColocatedJJ` flavor; otherwise the repo stays plain `.git`.
+    let isColocatedJJ: Bool
     let worktrees: [Worktree]?
     let errorMessage: String?
   }
 
   private func loadRepositoriesData(_ roots: [URL]) async -> ([Repository], [LoadFailure]) {
+    // Read the experimental gate once, up front, and capture the plain
+    // Bool into the `@Sendable` task closures below. When off, no root
+    // is ever promoted to `.gitColocatedJJ`, so the classifier output is
+    // byte-for-byte identical to the historical git/folder behavior.
+    @Shared(.experimentalJJIntegration) var experimentalJJIntegration
+    let jjIntegrationEnabled = experimentalJJIntegration
     let fetchResults = await withTaskGroup(of: WorktreesFetchResult.self) { group in
       for root in roots {
         let gitClient = self.gitClient
@@ -3729,6 +3739,7 @@ struct RepositoriesFeature {
             return WorktreesFetchResult(
               root: root,
               isGitRepository: false,
+              isColocatedJJ: false,
               worktrees: nil,
               errorMessage:
                 "Directory not found at \(root.standardizedFileURL.path(percentEncoded: false)). "
@@ -3743,15 +3754,21 @@ struct RepositoriesFeature {
             return WorktreesFetchResult(
               root: root,
               isGitRepository: false,
+              isColocatedJJ: false,
               worktrees: [],
               errorMessage: nil
             )
           }
+          // Cheap filesystem probe, skipped entirely when the
+          // experimental setting is off so the default path is
+          // unchanged.
+          let isColocatedJJ = jjIntegrationEnabled && (await gitClient.isColocatedJJRepository(root))
           do {
             let worktrees = try await gitClient.worktrees(root)
             return WorktreesFetchResult(
               root: root,
               isGitRepository: true,
+              isColocatedJJ: isColocatedJJ,
               worktrees: worktrees,
               errorMessage: nil
             )
@@ -3759,6 +3776,7 @@ struct RepositoriesFeature {
             return WorktreesFetchResult(
               root: root,
               isGitRepository: true,
+              isColocatedJJ: isColocatedJJ,
               worktrees: nil,
               errorMessage: error.localizedDescription
             )
@@ -3788,7 +3806,7 @@ struct RepositoriesFeature {
             rootURL: normalizedRoot,
             name: name,
             worktrees: IdentifiedArray(uniqueElements: worktrees),
-            isGitRepository: true
+            vcs: result.isColocatedJJ ? .gitColocatedJJ : .git
           )
           loaded.append(repository)
         } else {

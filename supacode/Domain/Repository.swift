@@ -2,17 +2,50 @@ import Foundation
 import IdentifiedCollections
 import SupacodeSettingsShared
 
+/// Version-control flavor of a repository root, resolved at load time.
+///
+/// `.git` and `.folder` are the historical two states; `.gitColocatedJJ`
+/// is a git repository that *also* has a colocated Jujutsu repo (a `.jj`
+/// directory sitting as a peer of `.git` in the repository root — jj's
+/// own definition of "colocated"). Both git flavors report
+/// `isGitRepository == true`, so every existing git-gated code path is
+/// unchanged when the flavor is `.gitColocatedJJ`; the jj augmentation is
+/// strictly additive and gated behind an experimental setting.
+///
+/// Runtime-only classification — never persisted (only the root path is
+/// persisted), so adding a case requires no migration. The flavor flips
+/// freely on reload as a directory is (un)initialized as git/jj.
+nonisolated enum RepositoryVCS: String, Hashable, Sendable, Codable {
+  case git
+  case gitColocatedJJ
+  case folder
+}
+
 struct Repository: Identifiable, Hashable, Sendable {
   let id: String
   let rootURL: URL
   let name: String
   let worktrees: IdentifiedArrayOf<Worktree>
-  // Runtime classification — `false` means the rootURL is a plain
-  // directory (no `.git` / `.bare`) and the repository is treated as
-  // a non-git folder. Persistence is unchanged; this flips freely on
-  // reload when the directory is (un)initialized as a git repo.
-  let isGitRepository: Bool
+  /// Resolved VCS flavor for this root (see `RepositoryVCS`). Runtime
+  /// classification, not persisted. Prefer reading `isGitRepository` /
+  /// `isColocatedJJ` at call sites; `vcs` is the underlying source of
+  /// truth that distinguishes plain git from colocated git+jj.
+  let vcs: RepositoryVCS
 
+  /// `false` only for a plain (non-git) folder root. Stays `true` for
+  /// both `.git` and `.gitColocatedJJ` so the 50+ existing
+  /// `isGitRepository` consumers keep treating a colocated repo as a
+  /// git repository (backward compatibility for the git/none contract).
+  nonisolated var isGitRepository: Bool { vcs != .folder }
+
+  /// Whether this root is a git repository with a colocated Jujutsu
+  /// repo. Only ever `true` when the experimental jj integration is on
+  /// (the loader downgrades colocated repos to `.git` when it is off).
+  nonisolated var isColocatedJJ: Bool { vcs == .gitColocatedJJ }
+
+  /// Backward-compatible initializer preserving the historical
+  /// `isGitRepository:` API. Maps to the two original flavors only —
+  /// callers that need the colocated flavor use `init(..., vcs:)`.
   init(
     id: String,
     rootURL: URL,
@@ -20,11 +53,27 @@ struct Repository: Identifiable, Hashable, Sendable {
     worktrees: IdentifiedArrayOf<Worktree>,
     isGitRepository: Bool = true
   ) {
+    self.init(
+      id: id,
+      rootURL: rootURL,
+      name: name,
+      worktrees: worktrees,
+      vcs: isGitRepository ? .git : .folder
+    )
+  }
+
+  init(
+    id: String,
+    rootURL: URL,
+    name: String,
+    worktrees: IdentifiedArrayOf<Worktree>,
+    vcs: RepositoryVCS
+  ) {
     self.id = id
     self.rootURL = rootURL
     self.name = name
     self.worktrees = worktrees
-    self.isGitRepository = isGitRepository
+    self.vcs = vcs
   }
 
   var initials: String {
@@ -70,6 +119,31 @@ struct Repository: Identifiable, Hashable, Sendable {
     guard headExists, !headIsDirectory.boolValue else { return false }
     return fileManager.fileExists(atPath: objectsPath)
       && fileManager.fileExists(atPath: refsPath)
+  }
+
+  /// Whether `rootURL` is a git repository with a *colocated* Jujutsu
+  /// repo. Colocation, in jj's own terms, means the `.jj` directory sits
+  /// as a peer of `.git` in the workspace root, so `git` and `jj`
+  /// commands can be used interchangeably. We only report colocation
+  /// when the root is already a git repository — a `.jj` without a
+  /// sibling git dir is a non-colocated jj repo whose internal git
+  /// store lives under `.jj/repo/store`, which Supacode's git-based
+  /// stack cannot drive, so it is deliberately not treated as a git
+  /// repo here.
+  ///
+  /// Pure FileManager call — safe to invoke off the main actor from the
+  /// `GitClientDependency` closure. Detection alone is harmless; the
+  /// loader only promotes a root to `.gitColocatedJJ` when the
+  /// experimental setting is enabled.
+  nonisolated static func isColocatedJJRepository(at rootURL: URL) -> Bool {
+    guard isGitRepository(at: rootURL) else { return false }
+    let jjPath =
+      rootURL
+      .appending(path: ".jj", directoryHint: .isDirectory)
+      .path(percentEncoded: false)
+    var isDirectory: ObjCBool = false
+    let exists = FileManager.default.fileExists(atPath: jjPath, isDirectory: &isDirectory)
+    return exists && isDirectory.boolValue
   }
 
   /// Prefix on folder-synthetic worktree ids. Single source of truth

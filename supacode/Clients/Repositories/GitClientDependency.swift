@@ -5,6 +5,12 @@ import SupacodeSettingsShared
 struct GitClientDependency: Sendable {
   var repoRoot: @Sendable (URL) async throws -> URL
   var isGitRepository: @Sendable (URL) async -> Bool
+  /// Whether the root is a git repository with a colocated Jujutsu repo
+  /// (`.jj` peer of `.git`). Pure detection — the loader only promotes a
+  /// root to `.gitColocatedJJ` when the experimental setting is on.
+  /// Routed through the dependency (like `isGitRepository`) so tests can
+  /// override it without touching the filesystem.
+  var isColocatedJJRepository: @Sendable (URL) async -> Bool
   /// Whether a root URL still points at a readable directory on
   /// disk. Separate from `isGitRepository` because a folder-kind
   /// root can exist without being a git repository, and we need
@@ -57,6 +63,7 @@ extension GitClientDependency: DependencyKey {
   static let liveValue = GitClientDependency(
     repoRoot: { try await GitClient().repoRoot(for: $0) },
     isGitRepository: { Repository.isGitRepository(at: $0) },
+    isColocatedJJRepository: { Repository.isColocatedJJRepository(at: $0) },
     rootDirectoryExists: { url in
       var isDirectory: ObjCBool = false
       let exists = FileManager.default.fileExists(
@@ -119,6 +126,10 @@ extension GitClientDependency: DependencyKey {
   static var testValue: GitClientDependency {
     var value = liveValue
     value.isGitRepository = { _ in true }
+    // Default to "not colocated" so existing fixtures with fake
+    // `/tmp/...` paths keep classifying as plain `.git`. jj-specific
+    // tests override this closure explicitly.
+    value.isColocatedJJRepository = { _ in false }
     value.rootDirectoryExists = { _ in true }
     value.reconcileSupacodeLocks = { _ in }
     return value
