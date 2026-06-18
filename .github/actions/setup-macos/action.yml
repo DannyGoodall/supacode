@@ -27,8 +27,13 @@ runs:
       with:
         version: 2026.3.0
         cache: true
+    # Only the canonical upstream repo has a linked Tuist project + remote
+    # cache credentials (via OIDC). Forks have neither, so `tuist auth login`
+    # fails with "No projects linked to the repository" and aborts setup
+    # before build/test. Gate auth on the upstream repo so forks build
+    # without the remote cache (slower, still correct).
     - name: Authenticate with Tuist
-      if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      if: ${{ github.repository == 'supabitapp/supacode' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
       shell: bash
       run: mise exec -- tuist auth login
     - name: Xcode cache key
