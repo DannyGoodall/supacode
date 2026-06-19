@@ -285,6 +285,18 @@ struct JJClient {
     _ = try await runJJ(["bookmark", "rename", oldName, newName], cwd: repoRoot.standardizedFileURL)
   }
 
+  /// Pushes a bookmark to its remote for pull-request prep
+  /// (`jj git push --bookmark <name> --allow-new`). `--allow-new` lets the
+  /// first push of a not-yet-remote bookmark create the remote branch; jj's
+  /// own force-with-lease-style safety checks still apply.
+  nonisolated func pushBookmark(named name: String, remote: String?, repoRoot: URL) async throws {
+    var arguments = ["git", "push", "--bookmark", name, "--allow-new"]
+    if let remote, !remote.trimmingCharacters(in: .whitespaces).isEmpty {
+      arguments += ["--remote", remote]
+    }
+    _ = try await runJJ(arguments, cwd: repoRoot.standardizedFileURL)
+  }
+
   /// Fetches from a remote (`jj git fetch [--remote <name>]`).
   nonisolated func fetch(remote: String, repoRoot: URL) async throws {
     var arguments = ["git", "fetch"]

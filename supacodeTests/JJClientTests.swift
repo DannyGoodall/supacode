@@ -222,6 +222,17 @@ struct JJClientTests {
     #expect(recorder.commands().contains(["bookmark", "rename", "old", "new"]))
   }
 
+  @Test func pushBookmarkIssuesAllowNewPush() async throws {
+    let recorder = JJCommandRecorder()
+    let shell = makeRecordingShell(recorder: recorder)
+    let client = JJClient(shell: shell)
+    try await client.pushBookmark(named: "feat", remote: nil, repoRoot: URL(fileURLWithPath: "/tmp/repo"))
+    try await client.pushBookmark(named: "feat", remote: "origin", repoRoot: URL(fileURLWithPath: "/tmp/repo"))
+    let cmds = recorder.commands()
+    #expect(cmds.contains(["git", "push", "--bookmark", "feat", "--allow-new"]))
+    #expect(cmds.contains(["git", "push", "--bookmark", "feat", "--allow-new", "--remote", "origin"]))
+  }
+
   @Test func fetchIssuesJJGitFetch() async throws {
     let recorder = JJCommandRecorder()
     let shell = makeRecordingShell(recorder: recorder)
