@@ -4711,12 +4711,7 @@ extension RepositoriesFeature.State {
     if repository.worktrees[id: worktree.id] != nil { return }
     var worktrees = repository.worktrees
     worktrees.insert(worktree, at: 0)
-    repositories[index] = Repository(
-      id: repository.id,
-      rootURL: repository.rootURL,
-      name: repository.name,
-      worktrees: worktrees,
-    )
+    repositories[index] = repository.replacingWorktrees(worktrees)
   }
 
   @discardableResult
@@ -4726,12 +4721,7 @@ extension RepositoriesFeature.State {
     guard repository.worktrees[id: worktreeID] != nil else { return false }
     var worktrees = repository.worktrees
     worktrees.remove(id: worktreeID)
-    repositories[index] = Repository(
-      id: repository.id,
-      rootURL: repository.rootURL,
-      name: repository.name,
-      worktrees: worktrees,
-    )
+    repositories[index] = repository.replacingWorktrees(worktrees)
     return true
   }
 
@@ -4869,12 +4859,7 @@ extension RepositoriesFeature.State {
         isMissing: worktree.isMissing,
         isAttached: worktree.isAttached,
       )
-      repositories[index] = Repository(
-        id: repository.id,
-        rootURL: repository.rootURL,
-        name: repository.name,
-        worktrees: worktrees,
-      )
+      repositories[index] = repository.replacingWorktrees(worktrees)
       return
     }
   }

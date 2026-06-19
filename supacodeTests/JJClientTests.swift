@@ -172,4 +172,107 @@ struct JJClientTests {
 
     #expect(result.contains { $0.name == "elsewhere" })
   }
+
+  // MARK: - Create / remove
+
+  /// Recording shell: captures every jj argv and answers list/root/remote.
+  private func makeRecordingShell(
+    recorder: JJCommandRecorder,
+    names: [String] = [],
+    paths: [String: String] = [:],
+    remotes: [String] = []
+  ) -> ShellClient {
+    ShellClient(
+      run: { _, _, _ in ShellOutput(stdout: "", stderr: "", exitCode: 0) },
+      runLoginImpl: { _, arguments, _, _ in
+        recorder.record(arguments)
+        if arguments.count >= 3, arguments[1] == "workspace", arguments[2] == "list" {
+          return ShellOutput(stdout: names.joined(separator: "\n") + "\n", stderr: "", exitCode: 0)
+        }
+        if arguments.count >= 5, arguments[1] == "workspace", arguments[2] == "root" {
+          return ShellOutput(stdout: (paths[arguments[4]] ?? "") + "\n", stderr: "", exitCode: 0)
+        }
+        if arguments.count >= 3, arguments[1] == "git", arguments[2] == "remote" {
+          let lines = remotes.map { "\($0) https://example.com/\($0).git" }
+          return ShellOutput(stdout: lines.joined(separator: "\n") + "\n", stderr: "", exitCode: 0)
+        }
+        return ShellOutput(stdout: "", stderr: "", exitCode: 0)
+      }
+    )
+  }
+
+  @Test func createWorkspaceAddsWorkspaceTranslatesRemoteRefAndCreatesBookmark() async throws {
+    let recorder = JJCommandRecorder()
+    let root = URL(fileURLWithPath: "/tmp/repo")
+    let baseDir = URL(fileURLWithPath: "/tmp/wts")
+    let shell = makeRecordingShell(recorder: recorder, remotes: ["origin"])
+
+    let worktree = try await JJClient(shell: shell).createWorkspace(
+      named: "feat", in: root, baseDirectory: baseDir, baseRef: "origin/main", directoryOverride: nil
+    )
+
+    #expect(worktree.workingDirectory.standardizedFileURL == baseDir.appending(path: "feat").standardizedFileURL)
+    #expect(worktree.name == "feat")
+    let cmds = recorder.commands()
+    // `origin/main` → `main@origin` because `origin` is a known remote.
+    #expect(cmds.contains(["workspace", "add", "/tmp/wts/feat", "--name", "feat", "-r", "main@origin"]))
+    #expect(cmds.contains(["bookmark", "create", "feat", "-r", "feat@"]))
+  }
+
+  @Test func createWorkspaceLeavesSlashedBookmarkUntranslated() async throws {
+    let recorder = JJCommandRecorder()
+    let shell = makeRecordingShell(recorder: recorder, remotes: ["origin"])  // no remote named "feature"
+
+    _ = try await JJClient(shell: shell).createWorkspace(
+      named: "ws", in: URL(fileURLWithPath: "/tmp/repo"),
+      baseDirectory: URL(fileURLWithPath: "/tmp/wts"), baseRef: "feature/x", directoryOverride: nil
+    )
+
+    #expect(recorder.commands().contains(["workspace", "add", "/tmp/wts/ws", "--name", "ws", "-r", "feature/x"]))
+  }
+
+  @Test func removeWorkspaceForgetsByPathMatchAndDeletesBookmark() async throws {
+    let root = URL(fileURLWithPath: "/tmp/repo")
+    let wsURL = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: wsURL) }
+    let recorder = JJCommandRecorder()
+    let shell = makeRecordingShell(
+      recorder: recorder,
+      names: ["default", "feat"],
+      paths: [
+        "default": root.path(percentEncoded: false),
+        "feat": wsURL.path(percentEncoded: false),
+      ]
+    )
+    let worktree = Worktree(
+      id: wsURL.path(percentEncoded: false), name: "feat-bookmark", detail: "",
+      workingDirectory: wsURL, repositoryRootURL: root
+    )
+
+    let removed = try await JJClient(shell: shell).removeWorkspace(worktree, deleteBookmark: true)
+
+    #expect(removed.standardizedFileURL == wsURL.standardizedFileURL)
+    let cmds = recorder.commands()
+    #expect(cmds.contains(["workspace", "forget", "feat"]))  // resolved by path match, not display name
+    #expect(cmds.contains(["bookmark", "delete", "feat-bookmark"]))
+  }
+}
+
+/// Thread-safe recorder of jj argv arrays for the create/remove tests.
+private nonisolated final class JJCommandRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recorded: [[String]] = []
+
+  func record(_ arguments: [String]) {
+    lock.lock()
+    defer { lock.unlock() }
+    // Drop the leading "jj" so assertions read as the subcommand argv.
+    recorded.append(Array(arguments.dropFirst()))
+  }
+
+  func commands() -> [[String]] {
+    lock.lock()
+    defer { lock.unlock() }
+    return recorded
+  }
 }

@@ -99,7 +99,17 @@ extension GitClientDependency: DependencyKey {
     ignoredFileCount: { try await GitClient().ignoredFileCount(for: $0) },
     untrackedFileCount: { try await GitClient().untrackedFileCount(for: $0) },
     createWorktree: { name, repoRoot, baseDirectory, copyIgnored, copyUntracked, baseRef in
-      try await GitClient().createWorktree(
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        // jj auto-snapshots; the copy-ignored/untracked flags don't apply.
+        return try await JJClient().createWorkspace(
+          named: name,
+          in: repoRoot,
+          baseDirectory: baseDirectory,
+          baseRef: baseRef,
+          directoryOverride: nil
+        )
+      }
+      return try await GitClient().createWorktree(
         named: name,
         in: repoRoot,
         baseDirectory: baseDirectory,
@@ -108,7 +118,16 @@ extension GitClientDependency: DependencyKey {
       )
     },
     createWorktreeStream: { name, repoRoot, baseDirectory, copyIgnored, copyUntracked, baseRef, directoryOverride in
-      GitClient().createWorktreeStream(
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        return JJClient().createWorkspaceStream(
+          named: name,
+          in: repoRoot,
+          baseDirectory: baseDirectory,
+          baseRef: baseRef,
+          directoryOverride: directoryOverride
+        )
+      }
+      return GitClient().createWorktreeStream(
         named: name,
         in: repoRoot,
         baseDirectory: baseDirectory,
@@ -118,7 +137,10 @@ extension GitClientDependency: DependencyKey {
       )
     },
     removeWorktree: { worktree, deleteBranch in
-      try await GitClient().removeWorktree(worktree, deleteBranch: deleteBranch)
+      if GitClientDependency.shouldUseJujutsuBackend(for: worktree.repositoryRootURL) {
+        return try await JJClient().removeWorkspace(worktree, deleteBookmark: deleteBranch)
+      }
+      return try await GitClient().removeWorktree(worktree, deleteBranch: deleteBranch)
     },
     isBareRepository: { repoRoot in
       try await GitClient().isBareRepository(for: repoRoot)

@@ -34,11 +34,11 @@
 
 ## 5. Workspace create / remove
 
-- [ ] 5.1 Implement create via `jj workspace add <path> -r <revset> [--name]`; map prompt base-ref to a revset/bookmark; map or hide copy-ignored/untracked toggles (`--sparse-patterns`)
-- [ ] 5.2 Auto-create a bookmark named from the prompt's branch/name field, pointing at the new workspace's working-copy commit, on every workspace creation
-- [ ] 5.3 Implement remove via `jj workspace forget` + directory removal; skip Git lock/prune machinery for jj
-- [ ] 5.4 Reject/translate folder-style and Git-only paths so jj repos route correctly
-- [ ] 5.5 Tests: create and remove flows for a co-located repo (stubbed backend), incl. anonymous-workspace handling
+- [x] 5.1 Implement create via `jj workspace add <path> --name <name> [-r <revset>]`; base-ref→revset translation (remote/branch → branch@remote only for known remotes). (Copy-ignored/untracked are dropped for jj since it auto-snapshots; surfacing this in the prompt UI — hide/relabel the toggles for jj repos — is a small follow-up.)
+- [x] 5.2 Auto-create a bookmark named from the name field at the new workspace's `@` on every create (Decision 7)
+- [x] 5.3 Implement remove via `jj workspace forget` (workspace name resolved by path-match) + directory removal + optional `jj bookmark delete`; no Git lock/prune machinery
+- [x] 5.4 Routing handles it: colocated repos are git repos so they pass the existing `isGitRepository` guards, then `shouldUseJujutsuBackend` sends create/remove to the jj backend; the main-worktree guard still protects the primary
+- [x] 5.5 Tests: create (add + remote-ref translation + auto-bookmark), slashed-bookmark untranslated, remove (forget-by-path-match + bookmark delete)
 
 ## 6. Bookmarks, fetch, push + external automation
 

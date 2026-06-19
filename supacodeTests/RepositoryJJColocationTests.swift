@@ -152,6 +152,20 @@ struct RepositoryJJColocationTests {
     #expect(!Repository.usesJujutsuBackend(vcs: .folder, preferJJ: nil))
   }
 
+  /// Regression: in-place worktree-set rebuilds MUST preserve `vcs`. Renaming
+  /// (and add/remove worktree) used to reconstruct via `init(isGitRepository:)`
+  /// — whose default reclassified a co-located jj repo back to `.git`, which
+  /// reverted the UI to git vocabulary after any such mutation.
+  @Test func replacingWorktreesPreservesVCSFlavor() {
+    let root = URL(fileURLWithPath: "/tmp/jj-replace")
+    let jjRepo = Repository(id: "jj", rootURL: root, name: "jj", worktrees: [], vcs: .gitColocatedJJ)
+    #expect(jjRepo.replacingWorktrees([]).vcs == .gitColocatedJJ)
+    #expect(jjRepo.replacingWorktrees([]).isColocatedJJ)
+
+    let folder = Repository(id: "f", rootURL: root, name: "f", worktrees: [], vcs: .folder)
+    #expect(folder.replacingWorktrees([]).vcs == .folder)
+  }
+
   // MARK: - Loader gate (git / jj+git / none)
 
   private func loaderState(root: URL) -> RepositoriesFeature.State {
