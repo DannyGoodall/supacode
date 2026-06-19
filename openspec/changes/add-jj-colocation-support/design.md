@@ -87,3 +87,19 @@ Resolved (see Decisions 7–9):
 Still open:
 - For colocation detection on secondary working copies (each jj workspace has its own `.jj`), is root-only detection sufficient, or do linked workspaces need their own probe?
 - Bookmark naming when the workspace name collides with an existing bookmark (suffix, reject, or reuse?).
+- **Workspace enumeration (blocks the sidebar listing read-path).** jj has no native
+  way to list workspaces *with their filesystem paths*: the `WorkspaceRef` template
+  type exposes only `.name()` and `.target()` (the working-copy commit), not a path —
+  unlike `git worktree list` (which the bundled `wt ls --json` relies on). Options:
+  - **A. Track on create.** Supacode persists each workspace's path↔name when it
+    creates it. Simple; externally-created/pre-existing workspaces won't appear.
+  - **B. Parse jj internal state** under `.jj/repo/...`. Fragile, version-dependent.
+  - **C. Scan the worktree base directory (recommended).** Enumerate immediate
+    subdirectories of the repo's configured worktree base dir that contain a `.jj`
+    directory; treat each as a workspace (plus the primary at the repo root). Mirrors
+    how `wt` already discovers git worktrees under a base dir; derive each workspace's
+    bookmark via `jj log -r @ -T bookmarks` run in that directory. Limitation:
+    workspaces created outside the base dir won't be listed (acceptable — matches the
+    "Supacode manages its own working copies" model).
+  - Sub-question (testable): does `jj workspace add` in a *colocated* repo register the
+    new workspace as a git worktree too (so `wt ls` would see it), or is it jj-only?
