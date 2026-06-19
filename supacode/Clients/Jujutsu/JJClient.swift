@@ -259,8 +259,42 @@ struct JJClient {
     return remotes.contains(prefix) ? "\(rest)@\(prefix)" : trimmed
   }
 
+  // MARK: - Bookmarks / remotes / fetch
+
+  /// Local bookmark names (lowercased, matching `GitClient.localBranchNames`)
+  /// via `jj bookmark list`. Used for rename dedup and branch listing.
+  nonisolated func bookmarkNames(for repoRoot: URL) async throws -> Set<String> {
+    let output = try await runJJ(["bookmark", "list", "--ignore-working-copy"], cwd: repoRoot.standardizedFileURL)
+    var names: Set<String> = []
+    for rawLine in output.split(whereSeparator: \.isNewline) {
+      let line = String(rawLine)
+      // Each local bookmark starts a line as `name: <target…>`; indented lines
+      // are continuations (conflict/target detail) — skip them.
+      guard let first = line.first, !first.isWhitespace, let colon = line.firstIndex(of: ":") else {
+        continue
+      }
+      let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+      if !name.isEmpty { names.insert(name.lowercased()) }
+    }
+    return names
+  }
+
+  /// Renames a bookmark (`jj bookmark rename`) — the jj counterpart to
+  /// `git branch -m`.
+  nonisolated func renameBookmark(from oldName: String, to newName: String, repoRoot: URL) async throws {
+    _ = try await runJJ(["bookmark", "rename", oldName, newName], cwd: repoRoot.standardizedFileURL)
+  }
+
+  /// Fetches from a remote (`jj git fetch [--remote <name>]`).
+  nonisolated func fetch(remote: String, repoRoot: URL) async throws {
+    var arguments = ["git", "fetch"]
+    let trimmed = remote.trimmingCharacters(in: .whitespaces)
+    if !trimmed.isEmpty { arguments += ["--remote", trimmed] }
+    _ = try await runJJ(arguments, cwd: repoRoot.standardizedFileURL)
+  }
+
   /// Remote names via `jj git remote list` (each line: `<name> <url>`).
-  nonisolated private func remoteNames(for repoRoot: URL) async throws -> [String] {
+  nonisolated func remoteNames(for repoRoot: URL) async throws -> [String] {
     let output = try await runJJ(["git", "remote", "list"], cwd: repoRoot)
     return
       output

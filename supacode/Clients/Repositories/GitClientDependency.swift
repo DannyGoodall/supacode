@@ -86,8 +86,16 @@ extension GitClientDependency: DependencyKey {
       return try await GitClient().worktrees(for: root)
     },
     reconcileSupacodeLocks: { await GitClient().reconcileSupacodeLocks(for: $0) },
-    localBranchNames: { try await GitClient().localBranchNames(for: $0) },
+    localBranchNames: { root in
+      if GitClientDependency.shouldUseJujutsuBackend(for: root) {
+        return try await JJClient().bookmarkNames(for: root)
+      }
+      return try await GitClient().localBranchNames(for: root)
+    },
     renameBranch: { oldName, newName, repoRoot in
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        return try await JJClient().renameBookmark(from: oldName, to: newName, repoRoot: repoRoot)
+      }
       try await GitClient().renameBranch(from: oldName, to: newName, for: repoRoot)
     },
     isValidBranchName: { branchName, repoRoot in
@@ -157,8 +165,18 @@ extension GitClientDependency: DependencyKey {
       }
       return await GitClient().lineChanges(at: url)
     },
-    remoteNames: { try await GitClient().remoteNames(for: $0) },
-    fetchRemote: { remote, repoRoot in try await GitClient().fetchRemote(remote, for: repoRoot) },
+    remoteNames: { root in
+      if GitClientDependency.shouldUseJujutsuBackend(for: root) {
+        return try await JJClient().remoteNames(for: root)
+      }
+      return try await GitClient().remoteNames(for: root)
+    },
+    fetchRemote: { remote, repoRoot in
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        return try await JJClient().fetch(remote: remote, repoRoot: repoRoot)
+      }
+      try await GitClient().fetchRemote(remote, for: repoRoot)
+    },
     remoteInfo: { repositoryRoot in
       await GitClient().remoteInfo(for: repositoryRoot)
     }

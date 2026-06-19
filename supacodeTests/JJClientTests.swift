@@ -180,7 +180,8 @@ struct JJClientTests {
     recorder: JJCommandRecorder,
     names: [String] = [],
     paths: [String: String] = [:],
-    remotes: [String] = []
+    remotes: [String] = [],
+    bookmarkList: String = ""
   ) -> ShellClient {
     ShellClient(
       run: { _, _, _ in ShellOutput(stdout: "", stderr: "", exitCode: 0) },
@@ -196,9 +197,40 @@ struct JJClientTests {
           let lines = remotes.map { "\($0) https://example.com/\($0).git" }
           return ShellOutput(stdout: lines.joined(separator: "\n") + "\n", stderr: "", exitCode: 0)
         }
+        if arguments.count >= 3, arguments[1] == "bookmark", arguments[2] == "list" {
+          return ShellOutput(stdout: bookmarkList, stderr: "", exitCode: 0)
+        }
         return ShellOutput(stdout: "", stderr: "", exitCode: 0)
       }
     )
+  }
+
+  @Test func bookmarkNamesParsesLocalBookmarksLowercased() async throws {
+    let recorder = JJCommandRecorder()
+    let shell = makeRecordingShell(
+      recorder: recorder,
+      bookmarkList: "Main: qpv 123 (empty)\nfeature/x: abc 456\n  (some indented continuation)\n"
+    )
+    let names = try await JJClient(shell: shell).bookmarkNames(for: URL(fileURLWithPath: "/tmp/repo"))
+    #expect(names == ["main", "feature/x"])
+  }
+
+  @Test func renameBookmarkIssuesRenameCommand() async throws {
+    let recorder = JJCommandRecorder()
+    let shell = makeRecordingShell(recorder: recorder)
+    try await JJClient(shell: shell).renameBookmark(from: "old", to: "new", repoRoot: URL(fileURLWithPath: "/tmp/repo"))
+    #expect(recorder.commands().contains(["bookmark", "rename", "old", "new"]))
+  }
+
+  @Test func fetchIssuesJJGitFetch() async throws {
+    let recorder = JJCommandRecorder()
+    let shell = makeRecordingShell(recorder: recorder)
+    let client = JJClient(shell: shell)
+    try await client.fetch(remote: "origin", repoRoot: URL(fileURLWithPath: "/tmp/repo"))
+    try await client.fetch(remote: "", repoRoot: URL(fileURLWithPath: "/tmp/repo"))
+    let cmds = recorder.commands()
+    #expect(cmds.contains(["git", "fetch", "--remote", "origin"]))
+    #expect(cmds.contains(["git", "fetch"]))
   }
 
   @Test func createWorkspaceAddsWorkspaceTranslatesRemoteRefAndCreatesBookmark() async throws {
