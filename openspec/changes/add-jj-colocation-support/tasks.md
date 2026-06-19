@@ -18,9 +18,10 @@
 
 - [ ] 3.1 Define a `VCSBackend` protocol covering the automated operations (list/create/remove working copy, branch/bookmark rename/delete/list, base-ref resolution, diff stats, fetch)
 - [ ] 3.2 Extract today's behavior into `GitBackend` conforming to the protocol; route `GitClientDependency` through it with no behavior change
-- [ ] 3.3 Add a persisted per-repository `preferJJ` preference that defaults, at repo-add time, to the experimental gate's current value (gate on → true, off → false); allow per-repo override
-- [ ] 3.4 Add per-repository backend selection: jj backend when `vcs == .gitColocatedJJ && preferJJ` (and the gate is on), Git backend otherwise
-- [ ] 3.5 Tests: existing git/folder reducer tests pass unchanged through the backend seam (green refactor); `preferJJ` default-from-gate and override select the expected backend
+- [x] 3.3 Add a persisted per-repository `preferJJ: Bool?` tri-state (nil = default/prefer-jj for colocated, false = Git override, true = explicit jj) on `RepositorySettings`
+- [ ] 3.4 Add the backend resolver `usesJujutsuBackend(vcs:preferJJ:) = vcs == .gitColocatedJJ && (preferJJ ?? true)` and wire it into per-repository backend selection
+- [ ] 3.5 Per-repo settings UI control to set `preferJJ` (true/false) for a co-located repository
+- [ ] 3.6 Tests: existing git/folder reducer tests pass unchanged through the backend seam (green refactor); the resolver returns the expected backend across vcs × preferJJ combinations
 
 ## 4. JJBackend read paths
 

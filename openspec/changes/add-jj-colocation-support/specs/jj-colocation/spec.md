@@ -98,18 +98,22 @@ For co-located repositories, fetching SHALL use `jj git fetch`, and the product 
 - **THEN** the pull request is tracked and displayed for that workspace exactly as for a Git branch
 
 ### Requirement: Per-repository jj preference
-For co-located repositories, the Jujutsu backend SHALL be selected only when a per-repository `preferJJ` preference is true (and the experimental gate is on). When a repository is added, `preferJJ` SHALL default to the current value of the experimental gate: true when the gate is on, false (Git) when off. The user SHALL be able to change `preferJJ` per repository afterwards.
+For co-located repositories, the Jujutsu backend SHALL be selected when, and only when, `vcs == .gitColocatedJJ` and the per-repository `preferJJ` preference is not an explicit Git override — i.e. backend = jj iff `preferJJ ?? true`. `preferJJ` is a persisted per-repository tri-state: `nil` means "use the default" (prefer jj for a co-located repo), `false` is an explicit Git override for that repository, and `true` is explicit jj. Since a root is only classified `.gitColocatedJJ` when the experimental gate is on, the gate is implicit in the `vcs` guard.
 
-#### Scenario: New repo added with the gate on
-- **WHEN** a co-located repository is added while the experimental gate is on
-- **THEN** its `preferJJ` preference defaults to true and the Jujutsu backend is used
+#### Scenario: Co-located repo with the gate on (default)
+- **WHEN** a co-located repository is loaded with the experimental gate on and `preferJJ` is unset
+- **THEN** the Jujutsu backend is used
 
-#### Scenario: New repo added with the gate off
-- **WHEN** a repository is added while the experimental gate is off
-- **THEN** its `preferJJ` preference defaults to false and the Git backend is used
+#### Scenario: Gate off
+- **WHEN** a repository is loaded while the experimental gate is off
+- **THEN** it is classified `.git` and the Git backend is used regardless of `preferJJ`
 
-#### Scenario: User overrides per repository
-- **WHEN** the user turns `preferJJ` off for a specific co-located repository
+#### Scenario: Plain Git repo is never jj
+- **WHEN** a plain `.git` repository has `preferJJ == true`
+- **THEN** the Git backend is still used (only `.gitColocatedJJ` repositories are eligible)
+
+#### Scenario: User overrides a co-located repo back to Git
+- **WHEN** the user sets `preferJJ` to false for a specific co-located repository
 - **THEN** that repository uses the Git backend while other co-located repositories are unaffected
 
 ### Requirement: Diff and working-copy change tracking

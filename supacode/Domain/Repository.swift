@@ -146,6 +146,16 @@ struct Repository: Identifiable, Hashable, Sendable {
     return exists && isDirectory.boolValue
   }
 
+  /// Whether a repository should be driven by the Jujutsu backend rather than
+  /// Git. Only co-located repositories are eligible — and a root is only ever
+  /// classified `.gitColocatedJJ` when the experimental gate is on, so the gate
+  /// is implicit here. `preferJJ` is the persisted per-repository tri-state:
+  /// `nil` uses the default (prefer jj for a co-located repo), `false` is an
+  /// explicit Git override for that repository, and `true` is explicit jj.
+  nonisolated static func usesJujutsuBackend(vcs: RepositoryVCS, preferJJ: Bool?) -> Bool {
+    vcs == .gitColocatedJJ && (preferJJ ?? true)
+  }
+
   /// Prefix on folder-synthetic worktree ids. Single source of truth
   /// so reducer call sites that need to recover the repo id from a
   /// folder worktree id (see `repositoryID(fromFolderWorktreeID:)`)
