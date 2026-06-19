@@ -10,15 +10,6 @@ struct DeveloperSettingsView: View {
   // not SettingsFeature/GlobalSettings — so bind the toggle straight to it.
   @Shared(.experimentalJJIntegration) private var experimentalJJIntegration: Bool
 
-  /// Toggle binding for the experimental jj gate. Mirrors the
-  /// `@Shared` + `withLock` pattern used by `SidebarCommands`.
-  private var experimentalJJToggle: Binding<Bool> {
-    Binding(
-      get: { experimentalJJIntegration },
-      set: { newValue in $experimentalJJIntegration.withLock { $0 = newValue } }
-    )
-  }
-
   var body: some View {
     Form {
       Section {
@@ -60,7 +51,7 @@ struct DeveloperSettingsView: View {
         .help("Silently re-applies the canonical hook layout to outdated agent integrations when Supacode activates.")
       }
       Section {
-        Toggle(isOn: experimentalJJToggle) {
+        Toggle(isOn: Binding($experimentalJJIntegration)) {
           Text("Use experimental co-located JJ integration")
           Text(
             "Detect repositories that have Jujutsu (jj) co-located with Git (a `.jj` directory beside `.git`) and "

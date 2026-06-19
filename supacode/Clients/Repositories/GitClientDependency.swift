@@ -180,19 +180,17 @@ extension GitClientDependency {
     @Shared(.experimentalJJIntegration) var experimentalJJIntegration
     guard experimentalJJIntegration else { return false }
     let base = url.standardizedFileURL
-    let jjPath = base.appending(path: ".jj", directoryHint: .isDirectory).path(percentEncoded: false)
-    var isDirectory: ObjCBool = false
-    guard
-      FileManager.default.fileExists(atPath: jjPath, isDirectory: &isDirectory),
-      isDirectory.boolValue
-    else { return false }
-    // Colocated primary (also a git repo) — honor the per-repo preferJJ override.
-    if Repository.isGitRepository(at: base) {
+    // Colocated primary (git + `.jj`) — single source of the colocation
+    // definition. Honor the per-repo preferJJ override.
+    if Repository.isColocatedJJRepository(at: base) {
       @Shared(.repositorySettings(base)) var repositorySettings
       return Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: repositorySettings.preferJJ)
     }
-    // Secondary jj-only workspace (no `.git`): gate on + `.jj` present → jj.
-    return true
+    // Secondary jj-only workspace (a `.jj` directory with no sibling `.git`):
+    // gate on + `.jj` present → jj.
+    let jjPath = base.appending(path: ".jj", directoryHint: .isDirectory).path(percentEncoded: false)
+    var isDirectory: ObjCBool = false
+    return FileManager.default.fileExists(atPath: jjPath, isDirectory: &isDirectory) && isDirectory.boolValue
   }
 }
 

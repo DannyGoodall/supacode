@@ -19,8 +19,8 @@
 - [x] 3.1 Use the existing `GitClientDependency` closure-DI as the VCS abstraction boundary; add `JJClient` as the jj concrete backend (no separate Swift protocol — see Decision 3)
 - [x] 3.2 Route `GitClientDependency` live closures per-repo via `shouldUseJujutsuBackend(for:)` (jj when colocated + gate + `preferJJ ?? true`, else Git unchanged), with graceful Git fallback on jj failure — wired for `worktrees` first
 - [x] 3.3 Add a persisted per-repository `preferJJ: Bool?` tri-state (nil = default/prefer-jj for colocated, false = Git override, true = explicit jj) on `RepositorySettings`
-- [ ] 3.4 Add the backend resolver `usesJujutsuBackend(vcs:preferJJ:) = vcs == .gitColocatedJJ && (preferJJ ?? true)` and wire it into per-repository backend selection
-- [ ] 3.5 Per-repo settings UI control to set `preferJJ` (true/false) for a co-located repository
+- [x] 3.4 Add the backend resolver `usesJujutsuBackend(vcs:preferJJ:) = vcs == .gitColocatedJJ && (preferJJ ?? true)` and wire it into `shouldUseJujutsuBackend(for:)` / `...ForWorkingCopy(at:)`
+- [x] 3.5 Per-repo settings UI: a "Version Control" Picker (Default/Use Jujutsu/Use Git → preferJJ nil/true/false) in RepositorySettingsView, shown only for colocated repos (threaded via SettingsRepositorySummary.isColocatedJJ)
 - [ ] 3.6 Tests: existing git/folder reducer tests pass unchanged through the backend seam (green refactor); the resolver returns the expected backend across vcs × preferJJ combinations
 
 ## 4. JJBackend read paths

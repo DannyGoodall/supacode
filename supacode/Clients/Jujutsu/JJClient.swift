@@ -44,7 +44,7 @@ struct JJClient {
       // detached-HEAD git worktree.
       let bookmark = await bookmarkAtWorkspace(named: name, repoRoot: repositoryRootURL)
       let isAttached = !bookmark.isEmpty
-      let detail = Self.relativePath(from: repositoryRootURL, to: workspaceURL)
+      let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: workspaceURL)
       let id = workspaceURL.path(percentEncoded: false)
       let resourceValues = try? workspaceURL.resourceValues(forKeys: [
         .creationDateKey, .contentModificationDateKey,
@@ -114,7 +114,7 @@ struct JJClient {
     else {
       return nil
     }
-    return Self.parseDiffStat(output)
+    return WorktreeTextFormatting.parseShortstat(output)
   }
 
   nonisolated private static let bookmarkTemplate =
@@ -131,22 +131,6 @@ struct JJClient {
     return line.split(separator: ",").first.map(String.init) ?? line
   }
 
-  /// Parses the `jj diff --stat` summary (`N files changed, X insertions(+),
-  /// Y deletions(-)`), which shares git's shortstat wording.
-  nonisolated private static func parseDiffStat(_ output: String) -> (added: Int, removed: Int) {
-    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return (0, 0) }
-    var added = 0
-    var removed = 0
-    if let match = trimmed.firstMatch(of: /(\d+)\s+insertions?\(\+\)/) {
-      added = Int(match.1) ?? 0
-    }
-    if let match = trimmed.firstMatch(of: /(\d+)\s+deletions?\(-\)/) {
-      removed = Int(match.1) ?? 0
-    }
-    return (added, removed)
-  }
-
   /// Runs `jj` via a login shell so the user's PATH (mise / brew / cargo
   /// installs) is honored, matching how `GitClient` reaches the bundled `wt`.
   nonisolated private func runJJ(_ arguments: [String], cwd: URL) async throws -> String {
@@ -154,27 +138,4 @@ struct JJClient {
     return try await shell.runLogin(env, ["jj"] + arguments, cwd).stdout
   }
 
-  /// Relative path from `base` to `target` (mirrors `GitClient`'s detail
-  /// computation so jj rows render identically to git worktree rows).
-  nonisolated private static func relativePath(from base: URL, to target: URL) -> String {
-    let baseComponents = base.standardizedFileURL.pathComponents
-    let targetComponents = target.standardizedFileURL.pathComponents
-    var index = 0
-    while index < min(baseComponents.count, targetComponents.count),
-      baseComponents[index] == targetComponents[index]
-    {
-      index += 1
-    }
-    var result: [String] = []
-    if index < baseComponents.count {
-      result.append(contentsOf: Array(repeating: "..", count: baseComponents.count - index))
-    }
-    if index < targetComponents.count {
-      result.append(contentsOf: targetComponents[index...])
-    }
-    if result.isEmpty {
-      return "."
-    }
-    return result.joined(separator: "/")
-  }
 }

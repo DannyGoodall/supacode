@@ -112,7 +112,7 @@ struct GitClient {
       let isMissing = !fileManager.fileExists(atPath: entry.path)
       let isAttached = !entry.branch.isEmpty
       let name = isAttached ? entry.branch : worktreeURL.lastPathComponent
-      let detail = Self.relativePath(from: repositoryRootURL, to: worktreeURL)
+      let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: worktreeURL)
       let id = worktreeURL.path(percentEncoded: false)
       let resourceValues = try? worktreeURL.resourceValues(forKeys: [
         .creationDateKey, .contentModificationDateKey,
@@ -522,7 +522,7 @@ struct GitClient {
                   throw GitClientError.commandFailed(command: command, message: "Empty output")
                 }
                 let worktreeURL = URL(fileURLWithPath: pathLine).standardizedFileURL
-                let detail = Self.relativePath(from: repositoryRootURL, to: worktreeURL)
+                let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: worktreeURL)
                 let id = worktreeURL.path(percentEncoded: false)
                 let resourceValues = try? worktreeURL.resourceValues(forKeys: [
                   .creationDateKey, .contentModificationDateKey,
@@ -630,7 +630,7 @@ struct GitClient {
         operation: .lineChanges,
         arguments: ["-C", path, "diff", "HEAD", "--shortstat"]
       )
-      let changes = parseShortstat(diff)
+      let changes = WorktreeTextFormatting.parseShortstat(diff)
       return (added: changes.added, removed: changes.removed)
     } catch {
       return nil
@@ -720,22 +720,6 @@ struct GitClient {
     return worktree.workingDirectory
   }
 
-  nonisolated private func parseShortstat(_ output: String) -> (added: Int, removed: Int) {
-    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
-      return (0, 0)
-    }
-    var added = 0
-    var removed = 0
-    if let match = trimmed.firstMatch(of: /(\d+)\s+insertions?\(\+\)/) {
-      added = Int(match.1) ?? 0
-    }
-    if let match = trimmed.firstMatch(of: /(\d+)\s+deletions?\(-\)/) {
-      removed = Int(match.1) ?? 0
-    }
-    return (added, removed)
-  }
-
   nonisolated private func parseFileListCount(_ output: String) -> Int {
     output
       .split(whereSeparator: \.isNewline)
@@ -820,28 +804,6 @@ struct GitClient {
     } catch {
       throw wrapShellError(error, operation: operation, command: command)
     }
-  }
-
-  nonisolated private static func relativePath(from base: URL, to target: URL) -> String {
-    let baseComponents = base.standardizedFileURL.pathComponents
-    let targetComponents = target.standardizedFileURL.pathComponents
-    var index = 0
-    while index < min(baseComponents.count, targetComponents.count),
-      baseComponents[index] == targetComponents[index]
-    {
-      index += 1
-    }
-    var result: [String] = []
-    if index < baseComponents.count {
-      result.append(contentsOf: Array(repeating: "..", count: baseComponents.count - index))
-    }
-    if index < targetComponents.count {
-      result.append(contentsOf: targetComponents[index...])
-    }
-    if result.isEmpty {
-      return "."
-    }
-    return result.joined(separator: "/")
   }
 
   nonisolated private static func directoryURL(for path: URL) -> URL {

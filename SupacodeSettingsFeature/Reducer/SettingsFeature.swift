@@ -608,6 +608,7 @@ public struct SettingsFeature {
       state.repositorySettings = RepositorySettingsFeature.State(
         rootURL: summary.rootURL,
         isGitRepository: summary.isGitRepository,
+        isColocatedJJ: summary.isColocatedJJ,
         settings: repositorySettings
       )
     } else {
@@ -615,6 +616,7 @@ public struct SettingsFeature {
       // without the selection changing — keep the feature state in
       // sync so the scripts page picks the right render path.
       state.repositorySettings?.isGitRepository = summary.isGitRepository
+      state.repositorySettings?.isColocatedJJ = summary.isColocatedJJ
     }
     state.syncGlobalDefaults(from: state.globalSettings)
   }
