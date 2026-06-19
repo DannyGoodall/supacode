@@ -55,10 +55,10 @@ The foundation phase (detection + flavor + gate, behind `experimentalJJIntegrati
 
 **9. Provide a bookmark push action.** A "Push (jj)" action SHALL be exposed (toolbar + CLI/deeplink) for jj repositories, running `jj git push --bookmark <name>` as the PR-prep step (jj has no Supacode push UI today, but jj users expect bookmark push before a PR exists).
 
-**10. Track jj workspaces in a persisted per-repo registry (track-on-create).** Empirically verified (see Open Questions → resolved): in a colocated repo, `jj workspace add` does NOT create a git worktree (`git worktree list`/`wt ls` see only the primary), `jj workspace list` reports names+commits but no path, the primary's `.jj` records no secondary paths, and workspaces may live at an arbitrary filesystem location. jj therefore cannot enumerate workspace paths. So Supacode SHALL persist a per-repository registry of the jj workspaces it creates — each record carries the workspace name and its absolute path — and the sidebar listing reads from that registry (skipping records whose directory no longer exists, mirroring git's `isMissing`). The primary workspace (repo root) is always included implicitly.
-- *Why:* it's the only reliable enumeration given jj's design; it fits Supacode's existing model of persisting per-repo/worktree metadata; and it correctly handles arbitrary workspace locations.
-- *Trade-off:* jj workspaces created outside Supacode (or before this feature) are not auto-discovered. Acceptable — Supacode manages its own working copies; an "import existing workspace" affordance can be added later if needed.
-- *Alternatives rejected:* base-dir scanning (workspaces can be anywhere); parsing `.jj` internals (fragile, and the primary doesn't record the paths anyway).
+**10. Enumerate jj workspaces live via `jj workspace list` + `jj workspace root --name` (no registry).** Empirically verified in jj 0.42.0 (see Open Questions → resolved): `jj workspace list` yields the workspace names, and `jj workspace root --name <NAME>` returns that workspace's absolute filesystem path — even for a non-current workspace at an arbitrary location. So the listing read-path enumerates names, resolves each path with `root --name`, and builds a row per workspace (skipping any whose directory no longer exists, mirroring git's `isMissing`). The workspace's displayed branch is the bookmark at its working-copy commit, resolved via `jj log -r '<NAME>@' -T bookmarks` (may be empty for an anonymous workspace).
+- *Why:* this is jj's supported, location-independent enumeration — analogous to git's `wt ls --json`. Crucially it discovers **pre-existing and externally-created** workspaces (a repo brought into Supacode with workspaces already present), which a track-on-create registry could not.
+- *Supersedes:* an earlier track-on-create persisted-registry plan (I had missed the `root --name` flag). No registry is needed; nothing extra is persisted for listing.
+- *Note:* `jj workspace add` in a colocated repo is still jj-only (not a git worktree), so git worktree enumeration does not see jj workspaces — `JJBackend` owns listing for jj repos.
 
 ## Risks / Trade-offs
 
@@ -92,10 +92,8 @@ Resolved (see Decisions 7–9):
 Still open:
 - For colocation detection on secondary working copies (each jj workspace has its own `.jj`), is root-only detection sufficient, or do linked workspaces need their own probe?
 - Bookmark naming when the workspace name collides with an existing bookmark (suffix, reject, or reuse?).
-- ~~Workspace enumeration~~ — **RESOLVED → Decision 10 (track-on-create registry).**
-  Probe results: `jj workspace add` in a colocated repo is jj-only (not a git
-  worktree; `git worktree list`/`wt ls` show only the primary); `jj workspace list`
-  has no path; the primary `.jj` records no secondary paths (only the secondary's
-  `.jj/repo` points back to the primary); workspaces can live anywhere. So Options B
-  (parse internals) and C (base-dir scan) are unworkable, and Option A (persist a
-  per-repo registry on create) is the chosen approach.
+- ~~Workspace enumeration~~ — **RESOLVED → Decision 10 (live `jj workspace list` +
+  `jj workspace root --name`).** jj 0.42.0's `jj workspace root --name <NAME>` returns
+  any workspace's absolute path (verified for a non-current workspace at an arbitrary
+  `/tmp` location), so live enumeration works and discovers pre-existing/external
+  workspaces. This supersedes the earlier registry idea (I had missed `root --name`).
