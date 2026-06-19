@@ -15,6 +15,11 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
   public var copyIgnoredOnWorktreeCreate: Bool?
   public var copyUntrackedOnWorktreeCreate: Bool?
   public var pullRequestMergeStrategy: PullRequestMergeStrategy?
+  /// Whether this repository should use the Jujutsu backend (only meaningful
+  /// for co-located git+jj repositories with the experimental gate on).
+  /// Defaulted at repo-add time to the gate's value; `nil` means "not yet
+  /// decided" and is treated as Git by the backend resolver for safety.
+  public var preferJJ: Bool?
 
   private enum CodingKeys: String, CodingKey {
     case setupScript
@@ -28,6 +33,7 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     case copyIgnoredOnWorktreeCreate
     case copyUntrackedOnWorktreeCreate
     case pullRequestMergeStrategy
+    case preferJJ
   }
 
   public static let `default` = RepositorySettings(
@@ -42,6 +48,7 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     copyIgnoredOnWorktreeCreate: nil,
     copyUntrackedOnWorktreeCreate: nil,
     pullRequestMergeStrategy: nil,
+    preferJJ: nil,
   )
 
   public init(
@@ -55,7 +62,8 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     worktreeBaseDirectoryPath: String? = nil,
     copyIgnoredOnWorktreeCreate: Bool? = nil,
     copyUntrackedOnWorktreeCreate: Bool? = nil,
-    pullRequestMergeStrategy: PullRequestMergeStrategy? = nil
+    pullRequestMergeStrategy: PullRequestMergeStrategy? = nil,
+    preferJJ: Bool? = nil
   ) {
     self.setupScript = setupScript
     self.archiveScript = archiveScript
@@ -68,6 +76,7 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     self.copyIgnoredOnWorktreeCreate = copyIgnoredOnWorktreeCreate
     self.copyUntrackedOnWorktreeCreate = copyUntrackedOnWorktreeCreate
     self.pullRequestMergeStrategy = pullRequestMergeStrategy
+    self.preferJJ = preferJJ
   }
 
   public init(from decoder: Decoder) throws {
@@ -109,6 +118,9 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     pullRequestMergeStrategy =
       try container.decodeIfPresent(PullRequestMergeStrategy.self, forKey: .pullRequestMergeStrategy)
       ?? Self.default.pullRequestMergeStrategy
+    preferJJ =
+      try container.decodeIfPresent(Bool.self, forKey: .preferJJ)
+      ?? Self.default.preferJJ
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -130,5 +142,6 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     try container.encodeIfPresent(copyIgnoredOnWorktreeCreate, forKey: .copyIgnoredOnWorktreeCreate)
     try container.encodeIfPresent(copyUntrackedOnWorktreeCreate, forKey: .copyUntrackedOnWorktreeCreate)
     try container.encodeIfPresent(pullRequestMergeStrategy, forKey: .pullRequestMergeStrategy)
+    try container.encodeIfPresent(preferJJ, forKey: .preferJJ)
   }
 }
