@@ -1,6 +1,14 @@
 import Foundation
 
 public nonisolated enum SupacodePaths {
+  /// Whether this is a Debug build, detected at runtime via the `.debug`
+  /// bundle-id suffix (paired with `PRODUCT_BUNDLE_IDENTIFIER` in
+  /// `Project.swift`). Single runtime-resolved home for the suffix so the data
+  /// dir and the App-init zmx pin can't disagree on the format.
+  public static var isDebugBuild: Bool {
+    Bundle.main.bundleIdentifier?.hasSuffix(".debug") == true
+  }
+
   public static var baseDirectory: URL {
     // 1) Explicit override wins — lets a build/run point at an isolated data
     //    dir (e.g. `SUPACODE_HOME=~/.supacode-debug`) without code changes.
@@ -13,8 +21,7 @@ public nonisolated enum SupacodePaths {
     // 2) Debug builds (bundle id suffixed `.debug`) keep their own data dir so
     //    a local dev build never clobbers the installed release app's
     //    `~/.supacode` state (settings, sidebar, terminal layouts).
-    let directoryName =
-      Bundle.main.bundleIdentifier?.hasSuffix(".debug") == true ? ".supacode-debug" : ".supacode"
+    let directoryName = isDebugBuild ? ".supacode-debug" : ".supacode"
     return FileManager.default.homeDirectoryForCurrentUser
       .appending(path: directoryName, directoryHint: .isDirectory)
   }
