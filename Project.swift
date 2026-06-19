@@ -239,9 +239,18 @@ let project = Project(
           "ENABLE_HARDENED_RUNTIME": "YES",
           "LD_RUNPATH_SEARCH_PATHS": "$(inherited) @executable_path/../Frameworks",
           "OTHER_LDFLAGS": "$(inherited) -lc++",
+          // Substituted into Info.plist's CFBundleName/CFBundleDisplayName so
+          // the Debug build shows a distinct name in the Dock/menu bar.
+          "SUPACODE_DISPLAY_NAME": "Supacode",
         ],
         debug: [
           "CODE_SIGN_ENTITLEMENTS": "supacode/supacodeDebug.entitlements",
+          // Distinct identity for local dev builds so they don't share
+          // UserDefaults / LaunchServices registration with the installed
+          // release app (also `app.supabit.supacode`). Paired with the
+          // separate `~/.supacode-debug` data dir in SupacodePaths.
+          "PRODUCT_BUNDLE_IDENTIFIER": "app.supabit.supacode.debug",
+          "SUPACODE_DISPLAY_NAME": "Supacode (Debug)",
         ],
         release: [
           "CODE_SIGN_ENTITLEMENTS": "supacode/supacode.entitlements",

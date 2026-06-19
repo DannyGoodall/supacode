@@ -2,8 +2,21 @@ import Foundation
 
 public nonisolated enum SupacodePaths {
   public static var baseDirectory: URL {
-    FileManager.default.homeDirectoryForCurrentUser
-      .appending(path: ".supacode", directoryHint: .isDirectory)
+    // 1) Explicit override wins — lets a build/run point at an isolated data
+    //    dir (e.g. `SUPACODE_HOME=~/.supacode-debug`) without code changes.
+    if let override = ProcessInfo.processInfo.environment["SUPACODE_HOME"],
+      !override.trimmingCharacters(in: .whitespaces).isEmpty
+    {
+      return URL(filePath: (override as NSString).expandingTildeInPath, directoryHint: .isDirectory)
+        .standardizedFileURL
+    }
+    // 2) Debug builds (bundle id suffixed `.debug`) keep their own data dir so
+    //    a local dev build never clobbers the installed release app's
+    //    `~/.supacode` state (settings, sidebar, terminal layouts).
+    let directoryName =
+      Bundle.main.bundleIdentifier?.hasSuffix(".debug") == true ? ".supacode-debug" : ".supacode"
+    return FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: directoryName, directoryHint: .isDirectory)
   }
 
   public static var reposDirectory: URL {
