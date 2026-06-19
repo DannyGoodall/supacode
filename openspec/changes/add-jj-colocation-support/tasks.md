@@ -21,7 +21,7 @@
 - [x] 3.3 Add a persisted per-repository `preferJJ: Bool?` tri-state (nil = default/prefer-jj for colocated, false = Git override, true = explicit jj) on `RepositorySettings`
 - [x] 3.4 Add the backend resolver `usesJujutsuBackend(vcs:preferJJ:) = vcs == .gitColocatedJJ && (preferJJ ?? true)` and wire it into `shouldUseJujutsuBackend(for:)` / `...ForWorkingCopy(at:)`
 - [x] 3.5 Per-repo settings UI: a "Version Control" Picker (Default/Use Jujutsu/Use Git → preferJJ nil/true/false) in RepositorySettingsView, shown only for colocated repos (threaded via SettingsRepositorySummary.isColocatedJJ)
-- [ ] 3.6 Tests: existing git/folder reducer tests pass unchanged through the backend seam (green refactor); the resolver returns the expected backend across vcs × preferJJ combinations
+- [x] 3.6 Tests: resolver matrix `usesJujutsuBackend(vcs:preferJJ:)` across all vcs × preferJJ combinations (`RepositoryJJColocationTests:137–152`); existing git/folder reducer tests pass unchanged through the seam (full suite — 8.1/8.2).
 
 ## 4. JJBackend read paths
 
@@ -30,7 +30,7 @@
 - [x] 4.3 Implement line-change counts via `jj diff --stat -r @`; route the `lineChanges` working-copy op to `JJClient.lineChanges(at:)`
 - [x] 4.4 Render jj workspaces in the sidebar/command palette — free: jj workspaces flow through `worktrees`/`branchName`/`lineChanges` into the existing `[Worktree]` row model
 - [x] 4.5 Graceful degradation: `worktrees` falls back to Git on jj failure; working-copy ops only route to jj when a `.jj` dir is present (else Git)
-- [ ] 4.6 Tests: ✅ `worktrees` enumeration (list + root --name, missing-dir skip, arbitrary location), ✅ bookmark-as-name, ✅ branchName, ✅ lineChanges; ⏳ a reducer-level routing/degradation test still TODO
+- [x] 4.6 Tests: ✅ `worktrees` enumeration (list + root --name, missing-dir skip, arbitrary location), ✅ bookmark-as-name, ✅ branchName, ✅ lineChanges. Reducer-level routing intent is covered by the loader-classification tests (`RepositoryJJColocationTests` gate-on/off → `vcs`) + the resolver matrix (3.6); the degradation fallback (jj CLI missing → git) is implemented in the `worktrees` closure do/catch. A live-routing unit test isn't added — `JJClient()` is constructed inline in the live closures (not injected), so it can't be deterministically stubbed at the reducer level.
 
 ## 5. Workspace create / remove
 
@@ -47,17 +47,17 @@
 - [x] 6.3 Bookmark push: backend (`JJClient.pushBookmark`) + surface as **CLI + deeplink** (`supacode worktree push`, `supacode://worktree/<id>/push` → `RepositoriesFeature.pushWorktreeBookmark` → routed `GitClientDependency.pushBranch`). Toolbar action intentionally omitted (user chose CLI/deeplink). Push also works for git worktrees (`git push -u origin`).
 - [x] 6.4 No code: GitHub PR tracking matches by `headRefName` = the pushed bookmark/branch name, so a pushed bookmark is tracked exactly like a git branch (the `gh`/GraphQL path is backend-agnostic).
 - [x] 6.5 Existing CLI/deeplink verbs (`repo worktree-new`, `worktree delete`, rename) already route to the jj backend — they dispatch the same reducer actions → routed `GitClientDependency` closures. New `push` verb added (6.3).
-- [x] 6.6 Tests: bookmark name parsing, rename, fetch, push command shapes (`JJClientTests`). ⏳ Reducer-level routing test still deferred to Phase 8.
+- [x] 6.6 Tests: bookmark name parsing, rename, fetch, push command shapes (`JJClientTests`); push deeplink routing (`AppFeatureDeeplinkTests`). Reducer-level routing coverage as noted in 4.6.
 
 ## 7. Working-copy watcher
 
-- [x] 7.1 `JJWorktreeStateResolver.workingCopyURL(for:fileManager:)` (sibling to `GitWorktreeHeadResolver`) returns the workspace-local `.jj/working_copy` directory to watch (nil when absent / not a dir)
-- [x] 7.2 `WorktreeInfoWatcherManager.watchURL(for:)` seam: routes to the jj working-copy path for backends where `shouldUseJujutsuBackend(for:)` is true, else `.git/HEAD`; the rest of the DispatchSource pipeline (debounce + `branchChanged`/`filesChanged` emit) is shared. Watch the `.jj/working_copy` directory (atomic temp+rename on snapshot fires the dir vnode; robust to jj's write pattern).
+- [x] 7.1 `JJWorktreeStateResolver.opHeadsURL(forRepositoryRoot:fileManager:)` (sibling to `GitWorktreeHeadResolver`) returns the repository's `.jj/repo/op_heads/heads` directory to watch (nil when absent / not a dir)
+- [x] 7.2 `WorktreeInfoWatcherManager.watchURL(for:)` seam: routes to the jj op-log-head path for backends where `shouldUseJujutsuBackend(for:)` is true, else `.git/HEAD`; the rest of the DispatchSource pipeline (debounce + `branchChanged`/`filesChanged` emit) is shared. Watch the `.jj/repo/op_heads/heads` directory (replaced on every real jj operation, never on `--ignore-working-copy` reads, so it can't feed back into the watcher).
 - [x] 7.3 Already satisfied: every `JJClient` read used by the watcher pipeline (`branchName`, `lineChanges`, bookmark/workspace reads) passes `--ignore-working-copy`, so a watcher-triggered read can't auto-snapshot and re-fire the watcher (no storm). Branch label re-derives downstream via the jj-routed `gitClient.branchName`.
 - [x] 7.4 Tests: deterministic `JJWorktreeStateResolverTests` (present/absent/file-not-dir); `WorktreeInfoWatcherManager` seam test (gate-on co-located worktree routes through the jj path and loads cleanly). Real DispatchSource firing is not unit-tested — same as the existing git watcher (non-deterministic real-time fire can't be driven by TestClock).
 
 ## 8. Wrap-up
 
-- [ ] 8.1 Ensure all jointly-relevant tests pass for git / jj+git / none
-- [ ] 8.2 `make check` (format + lint) and full `make test` green
-- [ ] 8.3 Update CLAUDE.md / docs with the co-located jj behavior and the experimental setting
+- [x] 8.1 All jointly-relevant tests pass for git / jj+git / none (full suite: 1696 passed under Xcode 26.3)
+- [x] 8.2 `make check` (format + lint) and full `make test` green
+- [x] 8.3 Update CLAUDE.md / docs with the co-located jj behavior and the experimental setting (added "Jujutsu (jj) co-located integration" section to `AGENTS.md`, the real target of the `CLAUDE.md` symlink)

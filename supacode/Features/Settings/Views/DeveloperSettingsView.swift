@@ -55,7 +55,7 @@ struct DeveloperSettingsView: View {
           Text("Use experimental co-located JJ integration")
           Text(
             "Detect repositories that have Jujutsu (jj) co-located with Git (a `.jj` directory beside `.git`) and "
-            + "offer jj-native equivalents. Off by default; takes effect on the next repository load.")
+              + "offer jj-native equivalents. Off by default; takes effect on the next repository load.")
         }
         .help("Experimental. When off, co-located repositories behave exactly as plain Git repositories.")
       } header: {

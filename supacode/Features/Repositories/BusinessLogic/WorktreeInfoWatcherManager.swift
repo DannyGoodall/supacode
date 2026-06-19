@@ -185,8 +185,8 @@ final class WorktreeInfoWatcherManager {
   }
 
   /// The filesystem path to watch for VCS state changes. For a co-located repo
-  /// using the jj backend it's the workspace's `.jj/working_copy` (snapshots
-  /// and `@` moves rewrite it); otherwise git's `HEAD`. Both feed the same
+  /// using the jj backend it's the repository's `.jj/repo/op_heads/heads`
+  /// (replaced on every real jj operation); otherwise git's `HEAD`. Both feed the same
   /// debounced branch/file-change pipeline, and the branch label is re-derived
   /// downstream via the already-jj-routed `gitClient.branchName` (which reads
   /// with `--ignore-working-copy`, so a watcher-triggered read can't snapshot
