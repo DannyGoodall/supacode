@@ -10,9 +10,9 @@
 
 ## 2. Settings UI toggle
 
-- [ ] 2.1 Surface a "Use experimental co-located JJ integration" toggle in the Settings General/Experimental pane, bound to `@Shared(.experimentalJJIntegration)`
-- [ ] 2.2 Add a settings deeplink/CLI path if consistent with existing settings panes
-- [ ] 2.3 Test: toggling the setting flips classification on the next repository load
+- [x] 2.1 Surface a "Use experimental co-located JJ integration" toggle in the Settings Developer pane ("Experimental" section), bound to `@Shared(.experimentalJJIntegration)`
+- [x] 2.2 Settings path: reachable via the existing Developer settings pane; no dedicated deeplink added (not warranted for a single experimental toggle)
+- [x] 2.3 Test: classification-follows-gate is covered by the foundation loader tests (`loaderClassifiesColocatedRepoAsGitColocatedJJWhenGateOn` / `...WhenGateOff`), which set the same `@Shared(.experimentalJJIntegration)` key this toggle writes
 
 ## 3. VCSBackend protocol + GitBackend extraction
 
