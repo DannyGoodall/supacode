@@ -67,9 +67,28 @@ For co-located repositories, creating a working copy SHALL create a Jujutsu work
 - **WHEN** a Jujutsu workspace is created
 - **THEN** a bookmark named from the prompt's branch/name field is created at the workspace's working-copy commit and shown as the workspace's branch
 
+#### Scenario: Create records the workspace in the registry
+- **WHEN** a Jujutsu workspace is created
+- **THEN** a registry record (name + absolute path) is persisted so the workspace is discoverable on the next listing
+
 #### Scenario: Remove a workspace
 - **WHEN** the user deletes a co-located working copy
-- **THEN** the workspace is forgotten and its directory removed, without invoking `git worktree remove`
+- **THEN** the workspace is forgotten (`jj workspace forget`), its directory removed, and its registry record deleted, without invoking `git worktree remove`
+
+### Requirement: Workspace discovery via a persisted registry
+Because jj cannot enumerate workspaces with their filesystem paths (and workspaces may live anywhere), Supacode SHALL maintain a persisted per-repository registry of the jj workspaces it creates — each record holding the workspace name and its absolute path. The sidebar listing for a co-located repository SHALL be built from the primary workspace (the repo root) plus the registry records, skipping any record whose directory no longer exists on disk. Creating a workspace SHALL add a record; removing one SHALL delete its record.
+
+#### Scenario: Listing reads from the registry
+- **WHEN** a co-located repository is listed
+- **THEN** the rows are the primary workspace plus each registry record whose directory still exists
+
+#### Scenario: Stale record is skipped
+- **WHEN** a registry record points at a directory that no longer exists
+- **THEN** that record is omitted from the listing (mirroring a missing git worktree)
+
+#### Scenario: Externally-created workspace is not listed
+- **WHEN** a jj workspace is created outside Supacode (not in the registry)
+- **THEN** it does not appear in the listing (a known limitation of jj's lack of path enumeration)
 
 ### Requirement: Bookmarks mirror branches
 For co-located repositories, branch operations SHALL map to Jujutsu bookmarks: rename maps to `jj bookmark rename`, delete maps to `jj bookmark delete`, and branch listing maps to `jj bookmark list`. The displayed "branch" for a workspace SHALL be the bookmark pointing at the working-copy commit (`@`), which MAY be empty when the workspace is anonymous.

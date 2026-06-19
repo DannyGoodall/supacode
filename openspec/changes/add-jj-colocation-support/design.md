@@ -55,6 +55,11 @@ The foundation phase (detection + flavor + gate, behind `experimentalJJIntegrati
 
 **9. Provide a bookmark push action.** A "Push (jj)" action SHALL be exposed (toolbar + CLI/deeplink) for jj repositories, running `jj git push --bookmark <name>` as the PR-prep step (jj has no Supacode push UI today, but jj users expect bookmark push before a PR exists).
 
+**10. Track jj workspaces in a persisted per-repo registry (track-on-create).** Empirically verified (see Open Questions → resolved): in a colocated repo, `jj workspace add` does NOT create a git worktree (`git worktree list`/`wt ls` see only the primary), `jj workspace list` reports names+commits but no path, the primary's `.jj` records no secondary paths, and workspaces may live at an arbitrary filesystem location. jj therefore cannot enumerate workspace paths. So Supacode SHALL persist a per-repository registry of the jj workspaces it creates — each record carries the workspace name and its absolute path — and the sidebar listing reads from that registry (skipping records whose directory no longer exists, mirroring git's `isMissing`). The primary workspace (repo root) is always included implicitly.
+- *Why:* it's the only reliable enumeration given jj's design; it fits Supacode's existing model of persisting per-repo/worktree metadata; and it correctly handles arbitrary workspace locations.
+- *Trade-off:* jj workspaces created outside Supacode (or before this feature) are not auto-discovered. Acceptable — Supacode manages its own working copies; an "import existing workspace" affordance can be added later if needed.
+- *Alternatives rejected:* base-dir scanning (workspaces can be anywhere); parsing `.jj` internals (fragile, and the primary doesn't record the paths anyway).
+
 ## Risks / Trade-offs
 
 - **No "current branch" in jj / working-copy watching (highest risk)** → `.git/HEAD` has no jj equivalent and jj auto-snapshots on most commands. Mitigation: watch `.jj/working_copy/` with the same DispatchSource mechanism, derive the displayed branch from the bookmark(s) at `@` via `jj log -r @ --ignore-working-copy`, and prototype this phase last (the foundation and read paths don't depend on it).
@@ -87,19 +92,10 @@ Resolved (see Decisions 7–9):
 Still open:
 - For colocation detection on secondary working copies (each jj workspace has its own `.jj`), is root-only detection sufficient, or do linked workspaces need their own probe?
 - Bookmark naming when the workspace name collides with an existing bookmark (suffix, reject, or reuse?).
-- **Workspace enumeration (blocks the sidebar listing read-path).** jj has no native
-  way to list workspaces *with their filesystem paths*: the `WorkspaceRef` template
-  type exposes only `.name()` and `.target()` (the working-copy commit), not a path —
-  unlike `git worktree list` (which the bundled `wt ls --json` relies on). Options:
-  - **A. Track on create.** Supacode persists each workspace's path↔name when it
-    creates it. Simple; externally-created/pre-existing workspaces won't appear.
-  - **B. Parse jj internal state** under `.jj/repo/...`. Fragile, version-dependent.
-  - **C. Scan the worktree base directory (recommended).** Enumerate immediate
-    subdirectories of the repo's configured worktree base dir that contain a `.jj`
-    directory; treat each as a workspace (plus the primary at the repo root). Mirrors
-    how `wt` already discovers git worktrees under a base dir; derive each workspace's
-    bookmark via `jj log -r @ -T bookmarks` run in that directory. Limitation:
-    workspaces created outside the base dir won't be listed (acceptable — matches the
-    "Supacode manages its own working copies" model).
-  - Sub-question (testable): does `jj workspace add` in a *colocated* repo register the
-    new workspace as a git worktree too (so `wt ls` would see it), or is it jj-only?
+- ~~Workspace enumeration~~ — **RESOLVED → Decision 10 (track-on-create registry).**
+  Probe results: `jj workspace add` in a colocated repo is jj-only (not a git
+  worktree; `git worktree list`/`wt ls` show only the primary); `jj workspace list`
+  has no path; the primary `.jj` records no secondary paths (only the secondary's
+  `.jj/repo` points back to the primary); workspaces can live anywhere. So Options B
+  (parse internals) and C (base-dir scan) are unworkable, and Option A (persist a
+  per-repo registry on create) is the chosen approach.

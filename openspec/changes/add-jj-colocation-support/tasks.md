@@ -25,12 +25,13 @@
 
 ## 4. JJBackend read paths
 
-- [ ] 4.1 Implement `JJBackend` working-copy listing via `jj workspace list` (map to the worktree row model)
-- [ ] 4.2 Implement bookmark listing via `jj bookmark list` and bookmark-at-`@` resolution for the displayed branch
+- [ ] 4.0 Add a persisted per-repository jj workspace registry (name + absolute path records); see Decision 10 (track-on-create) — jj cannot enumerate workspace paths
+- [ ] 4.1 Implement `JJBackend` working-copy listing from the registry (primary repo root + each registry record whose directory still exists), mapped to the worktree row model
+- [ ] 4.2 Implement bookmark listing via `jj bookmark list` and bookmark-at-`@` resolution (`jj log -r @ -T bookmarks`) for the displayed branch
 - [ ] 4.3 Implement line-change counts via `jj diff --stat -r @ --ignore-working-copy`
 - [ ] 4.4 Render jj workspaces in the sidebar/command palette using the existing row model
 - [ ] 4.5 Add graceful degradation to Git when the `jj` CLI is absent
-- [ ] 4.6 Tests: jj read paths with a stubbed jj backend; degradation path
+- [ ] 4.6 Tests: registry listing (incl. stale-record skip), jj read-path parsing with a stubbed shell, degradation path
 
 ## 5. Workspace create / remove
 
