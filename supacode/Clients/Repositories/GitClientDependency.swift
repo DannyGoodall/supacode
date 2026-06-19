@@ -123,8 +123,18 @@ extension GitClientDependency: DependencyKey {
     isBareRepository: { repoRoot in
       try await GitClient().isBareRepository(for: repoRoot)
     },
-    branchName: { await GitClient().branchName(for: $0) },
-    lineChanges: { await GitClient().lineChanges(at: $0) },
+    branchName: { url in
+      if GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) {
+        return await JJClient().branchName(forWorkspaceAt: url)
+      }
+      return await GitClient().branchName(for: url)
+    },
+    lineChanges: { url in
+      if GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) {
+        return await JJClient().lineChanges(at: url)
+      }
+      return await GitClient().lineChanges(at: url)
+    },
     remoteNames: { try await GitClient().remoteNames(for: $0) },
     fetchRemote: { remote, repoRoot in try await GitClient().fetchRemote(remote, for: repoRoot) },
     remoteInfo: { repositoryRoot in
@@ -160,6 +170,29 @@ extension GitClientDependency {
     guard Repository.isColocatedJJRepository(at: root) else { return false }
     @Shared(.repositorySettings(root)) var repositorySettings
     return Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: repositorySettings.preferJJ)
+  }
+
+  /// Working-copy-level variant for ops keyed by a worktree/workspace path
+  /// (e.g. `branchName`, `lineChanges`) rather than a repo root. A jj working
+  /// copy has a `.jj` directory: a colocated *primary* also has `.git` (so we
+  /// honor that repo's `preferJJ`), while a secondary jj workspace is jj-only.
+  nonisolated static func shouldUseJujutsuBackendForWorkingCopy(at url: URL) -> Bool {
+    @Shared(.experimentalJJIntegration) var experimentalJJIntegration
+    guard experimentalJJIntegration else { return false }
+    let base = url.standardizedFileURL
+    let jjPath = base.appending(path: ".jj", directoryHint: .isDirectory).path(percentEncoded: false)
+    var isDirectory: ObjCBool = false
+    guard
+      FileManager.default.fileExists(atPath: jjPath, isDirectory: &isDirectory),
+      isDirectory.boolValue
+    else { return false }
+    // Colocated primary (also a git repo) — honor the per-repo preferJJ override.
+    if Repository.isGitRepository(at: base) {
+      @Shared(.repositorySettings(base)) var repositorySettings
+      return Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: repositorySettings.preferJJ)
+    }
+    // Secondary jj-only workspace (no `.git`): gate on + `.jj` present → jj.
+    return true
   }
 }
 

@@ -38,6 +38,12 @@ struct JJClient {
       guard fileManager.fileExists(atPath: workspaceURL.path(percentEncoded: false)) else {
         continue
       }
+      // Display the bookmark at the workspace's working-copy commit when one
+      // exists; otherwise fall back to the workspace name. An anonymous
+      // workspace (no bookmark) is treated as not attached, mirroring a
+      // detached-HEAD git worktree.
+      let bookmark = await bookmarkAtWorkspace(named: name, repoRoot: repositoryRootURL)
+      let isAttached = !bookmark.isEmpty
       let detail = Self.relativePath(from: repositoryRootURL, to: workspaceURL)
       let id = workspaceURL.path(percentEncoded: false)
       let resourceValues = try? workspaceURL.resourceValues(forKeys: [
@@ -47,13 +53,13 @@ struct JJClient {
       worktrees.append(
         Worktree(
           id: id,
-          name: name,
+          name: isAttached ? bookmark : name,
           detail: detail,
           workingDirectory: workspaceURL,
           repositoryRootURL: repositoryRootURL,
           createdAt: createdAt,
           isMissing: false,
-          isAttached: true
+          isAttached: isAttached
         )
       )
     }
@@ -72,6 +78,73 @@ struct JJClient {
       .split(whereSeparator: \.isNewline)
       .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
       .filter { !$0.isEmpty }
+  }
+
+  /// Bookmark name at the working-copy commit of workspace `name`, resolved
+  /// from the primary via the `<name>@` revset. Empty when the workspace is
+  /// anonymous; jj errors are swallowed to empty.
+  nonisolated private func bookmarkAtWorkspace(named name: String, repoRoot: URL) async -> String {
+    let output = try? await runJJ(
+      ["log", "--ignore-working-copy", "--no-graph", "-r", "\(name)@", "-T", Self.bookmarkTemplate],
+      cwd: repoRoot
+    )
+    return Self.firstBookmark(from: output)
+  }
+
+  /// Bookmark at `@` for the workspace rooted at `workspaceURL` (the jj
+  /// counterpart to `GitClient.branchName`). nil when there is no bookmark or
+  /// jj fails.
+  nonisolated func branchName(forWorkspaceAt workspaceURL: URL) async -> String? {
+    let output = try? await runJJ(
+      ["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", Self.bookmarkTemplate],
+      cwd: workspaceURL.standardizedFileURL
+    )
+    let bookmark = Self.firstBookmark(from: output)
+    return bookmark.isEmpty ? nil : bookmark
+  }
+
+  /// Line changes for the workspace at `workspaceURL` via `jj diff --stat -r @`.
+  /// nil when jj fails (mirrors `GitClient.lineChanges` returning nil).
+  nonisolated func lineChanges(at workspaceURL: URL) async -> (added: Int, removed: Int)? {
+    guard
+      let output = try? await runJJ(
+        ["diff", "--stat", "-r", "@", "--ignore-working-copy"],
+        cwd: workspaceURL.standardizedFileURL
+      )
+    else {
+      return nil
+    }
+    return Self.parseDiffStat(output)
+  }
+
+  nonisolated private static let bookmarkTemplate =
+    "local_bookmarks.map(|b| b.name()).join(\",\") ++ \"\\n\""
+
+  /// First bookmark from the comma-joined template output (empty when none).
+  nonisolated private static func firstBookmark(from output: String?) -> String {
+    guard let output else { return "" }
+    let line =
+      output
+      .split(whereSeparator: \.isNewline)
+      .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+      .first { !$0.isEmpty } ?? ""
+    return line.split(separator: ",").first.map(String.init) ?? line
+  }
+
+  /// Parses the `jj diff --stat` summary (`N files changed, X insertions(+),
+  /// Y deletions(-)`), which shares git's shortstat wording.
+  nonisolated private static func parseDiffStat(_ output: String) -> (added: Int, removed: Int) {
+    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return (0, 0) }
+    var added = 0
+    var removed = 0
+    if let match = trimmed.firstMatch(of: /(\d+)\s+insertions?\(\+\)/) {
+      added = Int(match.1) ?? 0
+    }
+    if let match = trimmed.firstMatch(of: /(\d+)\s+deletions?\(-\)/) {
+      removed = Int(match.1) ?? 0
+    }
+    return (added, removed)
   }
 
   /// Runs `jj` via a login shell so the user's PATH (mise / brew / cargo

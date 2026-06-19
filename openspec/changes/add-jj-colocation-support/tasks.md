@@ -26,11 +26,11 @@
 ## 4. JJBackend read paths
 
 - [x] 4.1 Implement `JJClient` workspace listing via `jj workspace list` + `jj workspace root --name <NAME>` (Decision 10), mapped to the worktree row model; skip workspaces whose resolved dir is missing
-- [ ] 4.2 Resolve each workspace's displayed branch from its bookmark at `<NAME>@` (`jj log -r '<NAME>@' -T bookmarks`); also implement local bookmark listing via `jj bookmark list`
-- [ ] 4.3 Implement line-change counts via `jj diff --stat -r @ --ignore-working-copy`
-- [ ] 4.4 Render jj workspaces in the sidebar/command palette using the existing row model
-- [ ] 4.5 Add graceful degradation to Git when the `jj` CLI is absent
-- [ ] 4.6 Tests: workspace enumeration parsing (list + root --name, incl. missing-dir skip and a pre-existing/external workspace) with a stubbed shell, plus the degradation path
+- [x] 4.2 Resolve each workspace's displayed branch from its bookmark at `<NAME>@`; route the `branchName` working-copy op to `JJClient.branchName(forWorkspaceAt:)`. (Standalone `jj bookmark list` deferred to the bookmark-write phase where it's needed.)
+- [x] 4.3 Implement line-change counts via `jj diff --stat -r @`; route the `lineChanges` working-copy op to `JJClient.lineChanges(at:)`
+- [x] 4.4 Render jj workspaces in the sidebar/command palette — free: jj workspaces flow through `worktrees`/`branchName`/`lineChanges` into the existing `[Worktree]` row model
+- [x] 4.5 Graceful degradation: `worktrees` falls back to Git on jj failure; working-copy ops only route to jj when a `.jj` dir is present (else Git)
+- [ ] 4.6 Tests: ✅ `worktrees` enumeration (list + root --name, missing-dir skip, arbitrary location), ✅ bookmark-as-name, ✅ branchName, ✅ lineChanges; ⏳ a reducer-level routing/degradation test still TODO
 
 ## 5. Workspace create / remove
 
