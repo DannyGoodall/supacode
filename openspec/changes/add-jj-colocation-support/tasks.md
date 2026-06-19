@@ -14,10 +14,10 @@
 - [x] 2.2 Settings path: reachable via the existing Developer settings pane; no dedicated deeplink added (not warranted for a single experimental toggle)
 - [x] 2.3 Test: classification-follows-gate is covered by the foundation loader tests (`loaderClassifiesColocatedRepoAsGitColocatedJJWhenGateOn` / `...WhenGateOff`), which set the same `@Shared(.experimentalJJIntegration)` key this toggle writes
 
-## 3. VCSBackend protocol + GitBackend extraction
+## 3. Backend dispatch (GitClient / JJClient via the GitClientDependency seam)
 
-- [ ] 3.1 Define a `VCSBackend` protocol covering the automated operations (list/create/remove working copy, branch/bookmark rename/delete/list, base-ref resolution, diff stats, fetch)
-- [ ] 3.2 Extract today's behavior into `GitBackend` conforming to the protocol; route `GitClientDependency` through it with no behavior change
+- [x] 3.1 Use the existing `GitClientDependency` closure-DI as the VCS abstraction boundary; add `JJClient` as the jj concrete backend (no separate Swift protocol — see Decision 3)
+- [x] 3.2 Route `GitClientDependency` live closures per-repo via `shouldUseJujutsuBackend(for:)` (jj when colocated + gate + `preferJJ ?? true`, else Git unchanged), with graceful Git fallback on jj failure — wired for `worktrees` first
 - [x] 3.3 Add a persisted per-repository `preferJJ: Bool?` tri-state (nil = default/prefer-jj for colocated, false = Git override, true = explicit jj) on `RepositorySettings`
 - [ ] 3.4 Add the backend resolver `usesJujutsuBackend(vcs:preferJJ:) = vcs == .gitColocatedJJ && (preferJJ ?? true)` and wire it into per-repository backend selection
 - [ ] 3.5 Per-repo settings UI control to set `preferJJ` (true/false) for a co-located repository
@@ -25,7 +25,7 @@
 
 ## 4. JJBackend read paths
 
-- [ ] 4.1 Implement `JJBackend` workspace listing via `jj workspace list` + `jj workspace root --name <NAME>` (Decision 10), mapped to the worktree row model; skip workspaces whose resolved dir is missing
+- [x] 4.1 Implement `JJClient` workspace listing via `jj workspace list` + `jj workspace root --name <NAME>` (Decision 10), mapped to the worktree row model; skip workspaces whose resolved dir is missing
 - [ ] 4.2 Resolve each workspace's displayed branch from its bookmark at `<NAME>@` (`jj log -r '<NAME>@' -T bookmarks`); also implement local bookmark listing via `jj bookmark list`
 - [ ] 4.3 Implement line-change counts via `jj diff --stat -r @ --ignore-working-copy`
 - [ ] 4.4 Render jj workspaces in the sidebar/command palette using the existing row model

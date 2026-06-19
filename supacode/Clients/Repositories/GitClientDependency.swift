@@ -72,7 +72,19 @@ extension GitClientDependency: DependencyKey {
       )
       return exists && isDirectory.boolValue
     },
-    worktrees: { try await GitClient().worktrees(for: $0) },
+    worktrees: { root in
+      // Route co-located repos that prefer jj to the Jujutsu backend; on any
+      // jj failure (CLI missing/errored) degrade gracefully to Git so a
+      // colocated repo never fails to load.
+      if GitClientDependency.shouldUseJujutsuBackend(for: root) {
+        do {
+          return try await JJClient().workspaces(for: root)
+        } catch {
+          return try await GitClient().worktrees(for: root)
+        }
+      }
+      return try await GitClient().worktrees(for: root)
+    },
     reconcileSupacodeLocks: { await GitClient().reconcileSupacodeLocks(for: $0) },
     localBranchNames: { try await GitClient().localBranchNames(for: $0) },
     renameBranch: { oldName, newName, repoRoot in
@@ -133,6 +145,21 @@ extension GitClientDependency: DependencyKey {
     value.rootDirectoryExists = { _ in true }
     value.reconcileSupacodeLocks = { _ in }
     return value
+  }
+}
+
+extension GitClientDependency {
+  /// Whether VCS operations for `root` should be routed to the Jujutsu
+  /// backend. True only when the experimental gate is on, the root is a
+  /// colocated git+jj repository, and the per-repo `preferJJ` is not an
+  /// explicit Git override (`preferJJ ?? true`). Pure/synchronous reads so it
+  /// can gate the dependency's live closures cheaply.
+  nonisolated static func shouldUseJujutsuBackend(for root: URL) -> Bool {
+    @Shared(.experimentalJJIntegration) var experimentalJJIntegration
+    guard experimentalJJIntegration else { return false }
+    guard Repository.isColocatedJJRepository(at: root) else { return false }
+    @Shared(.repositorySettings(root)) var repositorySettings
+    return Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: repositorySettings.preferJJ)
   }
 }
 
