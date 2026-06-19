@@ -44,6 +44,16 @@ The foundation phase (detection + flavor + gate, behind `experimentalJJIntegrati
 
 **6. Skip Supacode's worktree lock machinery for jj.** The `locked` admin-dir file Supacode writes for Git worktrees has no jj analogue; ownership for jj is tracked via `jj workspace list`.
 
+**7. Always auto-create a bookmark on workspace creation.** Creating a jj workspace SHALL also create a bookmark (named from the prompt's branch/name field) pointing at the new working-copy commit.
+- *Why:* keeps the displayed "branch" non-anonymous and gives PR matching + push a stable name without a second user step. Resolves the anonymous-workspace risk by construction.
+- *Alternative considered:* create a bookmark only when the user names one — rejected because it leaves PR/branch flows with nothing to match in the common case.
+
+**8. Per-repository "prefer jj" preference, defaulted from the gate at add-time.** Backend selection is `vcs == .gitColocatedJJ && repoPrefersJJ`. A new persisted per-repo preference `preferJJ` defaults, when a repository is added, to the current value of the experimental gate: gate ON → `preferJJ = true`; gate OFF → `preferJJ = false` (Git). The user can flip it per repository afterwards.
+- *Why:* lets a jj user opt the whole app in once (gate on → new repos prefer jj) while still allowing a Git-first choice per repo; avoids silently switching backends on repos added before the user opted in.
+- *Alternative considered:* derive backend purely from the gate with no per-repo control — rejected because it forces an all-or-nothing choice and can't express "jj here, Git there."
+
+**9. Provide a bookmark push action.** A "Push (jj)" action SHALL be exposed (toolbar + CLI/deeplink) for jj repositories, running `jj git push --bookmark <name>` as the PR-prep step (jj has no Supacode push UI today, but jj users expect bookmark push before a PR exists).
+
 ## Risks / Trade-offs
 
 - **No "current branch" in jj / working-copy watching (highest risk)** → `.git/HEAD` has no jj equivalent and jj auto-snapshots on most commands. Mitigation: watch `.jj/working_copy/` with the same DispatchSource mechanism, derive the displayed branch from the bookmark(s) at `@` via `jj log -r @ --ignore-working-copy`, and prototype this phase last (the foundation and read paths don't depend on it).
@@ -68,7 +78,11 @@ Phased delivery, each phase its own implementable unit; rollback at any point is
 
 ## Open Questions
 
-- Should workspace creation always auto-create a bookmark, or only when the user names one? (Affects PR matching for otherwise-anonymous workspaces.)
-- Default for a per-repo "prefer jj" preference when colocation is detected: default to Git (opt-in per repo) or to jj? Leaning Git-by-default for safety.
-- Should a bookmark "push" action be added to the toolbar/CLI now, or deferred until PR-prep demand is confirmed?
+Resolved (see Decisions 7–9):
+- Auto-create a bookmark on workspace creation → **Yes, always** (Decision 7).
+- Per-repo "prefer jj" default → **per-repo preference, defaulted from the gate at add-time** (Decision 8).
+- Bookmark push action → **Yes, add it** (Decision 9).
+
+Still open:
 - For colocation detection on secondary working copies (each jj workspace has its own `.jj`), is root-only detection sufficient, or do linked workspaces need their own probe?
+- Bookmark naming when the workspace name collides with an existing bookmark (suffix, reject, or reuse?).

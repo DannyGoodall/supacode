@@ -57,11 +57,15 @@ VCS operations that Supacode automates (list/create/remove working copies, branc
 - **THEN** it is handled by the Jujutsu backend
 
 ### Requirement: Jujutsu workspace lifecycle mirrors worktrees
-For co-located repositories, creating a working copy SHALL create a Jujutsu workspace (`jj workspace add`) and removing one SHALL forget the workspace (`jj workspace forget`) and remove its directory, mirroring the Git worktree create/remove flows. The new-workspace prompt SHALL offer a base revision (bookmark or revset) in place of a Git base ref, and MAY create a bookmark for the workspace so downstream branch/PR flows resolve a name.
+For co-located repositories, creating a working copy SHALL create a Jujutsu workspace (`jj workspace add`) and removing one SHALL forget the workspace (`jj workspace forget`) and remove its directory, mirroring the Git worktree create/remove flows. The new-workspace prompt SHALL offer a base revision (bookmark or revset) in place of a Git base ref. Creating a workspace SHALL also create a bookmark, named from the prompt's branch/name field, pointing at the new working-copy commit, so downstream branch/PR/push flows always resolve a name.
 
 #### Scenario: Create a workspace
 - **WHEN** the user creates a new working copy in a co-located repository
 - **THEN** a Jujutsu workspace is created at the chosen location with the chosen base revision and appears in the sidebar
+
+#### Scenario: Workspace creation auto-creates a bookmark
+- **WHEN** a Jujutsu workspace is created
+- **THEN** a bookmark named from the prompt's branch/name field is created at the workspace's working-copy commit and shown as the workspace's branch
 
 #### Scenario: Remove a workspace
 - **WHEN** the user deletes a co-located working copy
@@ -79,15 +83,34 @@ For co-located repositories, branch operations SHALL map to Jujutsu bookmarks: r
 - **THEN** the UI shows no branch name rather than an error
 
 ### Requirement: Remote and pull-request operations
-For co-located repositories, fetching SHALL use `jj git fetch`, and the product MAY offer a bookmark push (`jj git push --bookmark`) as a pull-request preparation step. GitHub pull-request tracking, merge, close, and checks SHALL continue to operate via the `gh` CLI unchanged, matching pull requests to workspaces by the pushed bookmark name.
+For co-located repositories, fetching SHALL use `jj git fetch`, and the product SHALL provide a bookmark push action (`jj git push --bookmark <name>`) as a pull-request preparation step, exposed on the toolbar and the CLI/deeplink surface. GitHub pull-request tracking, merge, close, and checks SHALL continue to operate via the `gh` CLI unchanged, matching pull requests to workspaces by the pushed bookmark name.
 
 #### Scenario: Fetch on a co-located repository
 - **WHEN** a fetch is requested for a co-located repository
 - **THEN** `jj git fetch` is used and remote state is updated
 
+#### Scenario: Push a bookmark for PR prep
+- **WHEN** the user invokes the push action on a co-located workspace
+- **THEN** the workspace's bookmark is pushed with `jj git push --bookmark <name>` so a pull request can be opened against it
+
 #### Scenario: PR tracking still works
 - **WHEN** a workspace's bookmark has been pushed and a pull request exists for it
 - **THEN** the pull request is tracked and displayed for that workspace exactly as for a Git branch
+
+### Requirement: Per-repository jj preference
+For co-located repositories, the Jujutsu backend SHALL be selected only when a per-repository `preferJJ` preference is true (and the experimental gate is on). When a repository is added, `preferJJ` SHALL default to the current value of the experimental gate: true when the gate is on, false (Git) when off. The user SHALL be able to change `preferJJ` per repository afterwards.
+
+#### Scenario: New repo added with the gate on
+- **WHEN** a co-located repository is added while the experimental gate is on
+- **THEN** its `preferJJ` preference defaults to true and the Jujutsu backend is used
+
+#### Scenario: New repo added with the gate off
+- **WHEN** a repository is added while the experimental gate is off
+- **THEN** its `preferJJ` preference defaults to false and the Git backend is used
+
+#### Scenario: User overrides per repository
+- **WHEN** the user turns `preferJJ` off for a specific co-located repository
+- **THEN** that repository uses the Git backend while other co-located repositories are unaffected
 
 ### Requirement: Diff and working-copy change tracking
 For co-located repositories, line-change counts SHALL be computed with `jj diff --stat` against the working-copy commit, and live change/branch notifications SHALL be derived by watching the Jujutsu working-copy state rather than `.git/HEAD`. Read-only jj queries used by watchers SHALL avoid triggering working-copy snapshots.

@@ -18,8 +18,9 @@
 
 - [ ] 3.1 Define a `VCSBackend` protocol covering the automated operations (list/create/remove working copy, branch/bookmark rename/delete/list, base-ref resolution, diff stats, fetch)
 - [ ] 3.2 Extract today's behavior into `GitBackend` conforming to the protocol; route `GitClientDependency` through it with no behavior change
-- [ ] 3.3 Add per-repository backend selection keyed off `Repository.vcs` (Git backend for `.git`/`.folder`, jj backend for `.gitColocatedJJ`)
-- [ ] 3.4 Tests: existing git/folder reducer tests pass unchanged through the backend seam (green refactor)
+- [ ] 3.3 Add a persisted per-repository `preferJJ` preference that defaults, at repo-add time, to the experimental gate's current value (gate on → true, off → false); allow per-repo override
+- [ ] 3.4 Add per-repository backend selection: jj backend when `vcs == .gitColocatedJJ && preferJJ` (and the gate is on), Git backend otherwise
+- [ ] 3.5 Tests: existing git/folder reducer tests pass unchanged through the backend seam (green refactor); `preferJJ` default-from-gate and override select the expected backend
 
 ## 4. JJBackend read paths
 
@@ -33,7 +34,7 @@
 ## 5. Workspace create / remove
 
 - [ ] 5.1 Implement create via `jj workspace add <path> -r <revset> [--name]`; map prompt base-ref to a revset/bookmark; map or hide copy-ignored/untracked toggles (`--sparse-patterns`)
-- [ ] 5.2 Optionally auto-create a bookmark on workspace creation (resolve the Open Question in design first)
+- [ ] 5.2 Auto-create a bookmark named from the prompt's branch/name field, pointing at the new workspace's working-copy commit, on every workspace creation
 - [ ] 5.3 Implement remove via `jj workspace forget` + directory removal; skip Git lock/prune machinery for jj
 - [ ] 5.4 Reject/translate folder-style and Git-only paths so jj repos route correctly
 - [ ] 5.5 Tests: create and remove flows for a co-located repo (stubbed backend), incl. anonymous-workspace handling
@@ -42,7 +43,7 @@
 
 - [ ] 6.1 Map branch rename/delete to `jj bookmark rename` / `jj bookmark delete`; re-author `RenameBranchFeature` stderr translation for jj messages and detect conflicted bookmarks (`name??`)
 - [ ] 6.2 Map fetch to `jj git fetch`
-- [ ] 6.3 Add an optional bookmark push (`jj git push --bookmark`) for PR prep (toolbar/CLI), per the design Open Question
+- [ ] 6.3 Add a bookmark push action (`jj git push --bookmark <name>`) for PR prep, exposed on the toolbar and the CLI/deeplink surface
 - [ ] 6.4 Confirm GitHub PR tracking matches PRs to workspaces by pushed bookmark name (no `gh` changes expected)
 - [ ] 6.5 Route `supacode-cli` (`repo worktree-new`, `worktree delete`, etc.) and `supacode://` deeplinks to the jj backend for co-located repos, keeping verbs/vocabulary unchanged
 - [ ] 6.6 Tests: bookmark ops, fetch, CLI/deeplink routing for co-located repos
