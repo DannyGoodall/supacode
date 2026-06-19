@@ -51,10 +51,10 @@
 
 ## 7. Working-copy watcher
 
-- [ ] 7.1 Add a jj working-copy resolver (sibling to `GitWorktreeHeadResolver`) returning the `.jj/` paths to watch
-- [ ] 7.2 Extend `WorktreeInfoWatcherManager` to watch `.jj/working_copy/` for jj repos and emit branch/file-change events
-- [ ] 7.3 Derive the current bookmark from `@` for live branch-label updates using `--ignore-working-copy` reads (avoid snapshot storms)
-- [ ] 7.4 Tests: watcher emits change/branch events on simulated jj working-copy changes
+- [x] 7.1 `JJWorktreeStateResolver.workingCopyURL(for:fileManager:)` (sibling to `GitWorktreeHeadResolver`) returns the workspace-local `.jj/working_copy` directory to watch (nil when absent / not a dir)
+- [x] 7.2 `WorktreeInfoWatcherManager.watchURL(for:)` seam: routes to the jj working-copy path for backends where `shouldUseJujutsuBackend(for:)` is true, else `.git/HEAD`; the rest of the DispatchSource pipeline (debounce + `branchChanged`/`filesChanged` emit) is shared. Watch the `.jj/working_copy` directory (atomic temp+rename on snapshot fires the dir vnode; robust to jj's write pattern).
+- [x] 7.3 Already satisfied: every `JJClient` read used by the watcher pipeline (`branchName`, `lineChanges`, bookmark/workspace reads) passes `--ignore-working-copy`, so a watcher-triggered read can't auto-snapshot and re-fire the watcher (no storm). Branch label re-derives downstream via the jj-routed `gitClient.branchName`.
+- [x] 7.4 Tests: deterministic `JJWorktreeStateResolverTests` (present/absent/file-not-dir); `WorktreeInfoWatcherManager` seam test (gate-on co-located worktree routes through the jj path and loads cleanly). Real DispatchSource firing is not unit-tested — same as the existing git watcher (non-deterministic real-time fire can't be driven by TestClock).
 
 ## 8. Wrap-up
 

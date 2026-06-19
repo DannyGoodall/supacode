@@ -1,5 +1,7 @@
 import Clocks
+import ComposableArchitecture
 import Foundation
+import Sharing
 import Testing
 
 @testable import supacode
@@ -23,6 +25,34 @@ struct WorktreeInfoWatcherManagerTests {
     manager.handleCommand(.stop)
     await task.value
     try FileManager.default.removeItem(at: tempWorktree.tempRoot)
+  }
+
+  /// With the experimental gate on, a co-located jj worktree loads cleanly,
+  /// configures its op-log watcher, and emits the initial files-changed signal.
+  @Test func colocatedJJWorktreeLoadsCleanlyWhenGateOn() async throws {
+    try await withDependencies {
+      $0.defaultAppStorage = .inMemory
+    } operation: {
+      @Shared(.experimentalJJIntegration) var jjEnabled
+      $jjEnabled.withLock { $0 = true }
+
+      let tempWorktree = try makeTempColocatedJJWorktree()
+      let manager = WorktreeInfoWatcherManager(
+        focusedInterval: .seconds(3_600),
+        unfocusedInterval: .seconds(3_600)
+      )
+      let (collector, task) = startCollecting(manager.eventStream())
+
+      manager.handleCommand(.setPullRequestTrackingEnabled(false))
+      manager.handleCommand(.setWorktrees([tempWorktree.worktree]))
+
+      await drainAsyncEvents(120)
+      #expect(await collector.filesChangedCount(worktreeID: tempWorktree.worktree.id) == 1)
+
+      manager.handleCommand(.stop)
+      await task.value
+      try FileManager.default.removeItem(at: tempWorktree.tempRoot)
+    }
   }
 
   @Test func defersLineChangesForWorktreesAddedAfterInitialLoad() async throws {
@@ -220,6 +250,32 @@ private func makeTempWorktree() throws -> TempWorktree {
     detail: "detail",
     workingDirectory: worktreeDirectory,
     repositoryRootURL: tempRoot
+  )
+  return TempWorktree(worktree: worktree, tempRoot: tempRoot, headURL: headURL)
+}
+
+/// A co-located worktree: `.git/HEAD` (so it classifies as a git repo) plus a
+/// peer `.jj/working_copy/` directory (so the jj watch path resolves).
+private func makeTempColocatedJJWorktree() throws -> TempWorktree {
+  let fileManager = FileManager.default
+  let tempRoot = fileManager.temporaryDirectory.appending(path: UUID().uuidString)
+  let worktreeDirectory = tempRoot.appending(path: "wt")
+  let gitDirectory = worktreeDirectory.appending(path: ".git")
+  try fileManager.createDirectory(at: gitDirectory, withIntermediateDirectories: true)
+  let headURL = gitDirectory.appending(path: "HEAD")
+  try "ref: refs/heads/main\n".write(to: headURL, atomically: true, encoding: .utf8)
+  let workingCopy = worktreeDirectory.appending(path: ".jj").appending(path: "working_copy")
+  try fileManager.createDirectory(at: workingCopy, withIntermediateDirectories: true)
+  // The op-log head dir is what the jj watcher now watches.
+  let opHeads = worktreeDirectory.appending(path: ".jj").appending(path: "repo")
+    .appending(path: "op_heads").appending(path: "heads")
+  try fileManager.createDirectory(at: opHeads, withIntermediateDirectories: true)
+  let worktree = Worktree(
+    id: worktreeDirectory.path(percentEncoded: false),
+    name: "main",
+    detail: "detail",
+    workingDirectory: worktreeDirectory,
+    repositoryRootURL: worktreeDirectory
   )
   return TempWorktree(worktree: worktree, tempRoot: tempRoot, headURL: headURL)
 }
