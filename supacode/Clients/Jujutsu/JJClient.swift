@@ -251,29 +251,28 @@ struct JJClient {
   nonisolated private func revset(forBaseRef baseRef: String, repoRoot: URL) async -> String? {
     let trimmed = baseRef.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
-    guard let slash = trimmed.firstIndex(of: "/") else { return trimmed }
-    let prefix = String(trimmed[..<slash])
-    let rest = String(trimmed[trimmed.index(after: slash)...])
-    guard !prefix.isEmpty, !rest.isEmpty else { return trimmed }
     let remotes = (try? await remoteNames(for: repoRoot)) ?? []
-    return remotes.contains(prefix) ? "\(rest)@\(prefix)" : trimmed
+    if let match = GitReferenceQueries.remotePrefixMatch(ref: trimmed, remoteNames: remotes) {
+      return "\(match.branch)@\(match.remote)"
+    }
+    return trimmed
   }
 
   // MARK: - Bookmarks / remotes / fetch
 
   /// Local bookmark names (lowercased, matching `GitClient.localBranchNames`)
-  /// via `jj bookmark list`. Used for rename dedup and branch listing.
+  /// via `jj bookmark list -T 'name() ++ "\n"'`. The `-T` template emits one
+  /// bare name per line (robust to display/conflict formatting), matching how
+  /// `workspaceNames` reads `jj workspace list`. Used for rename dedup and
+  /// branch listing.
   nonisolated func bookmarkNames(for repoRoot: URL) async throws -> Set<String> {
-    let output = try await runJJ(["bookmark", "list", "--ignore-working-copy"], cwd: repoRoot.standardizedFileURL)
+    let output = try await runJJ(
+      ["bookmark", "list", "--ignore-working-copy", "-T", "name() ++ \"\\n\""],
+      cwd: repoRoot.standardizedFileURL
+    )
     var names: Set<String> = []
     for rawLine in output.split(whereSeparator: \.isNewline) {
-      let line = String(rawLine)
-      // Each local bookmark starts a line as `name: <target…>`; indented lines
-      // are continuations (conflict/target detail) — skip them.
-      guard let first = line.first, !first.isWhitespace, let colon = line.firstIndex(of: ":") else {
-        continue
-      }
-      let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+      let name = String(rawLine).trimmingCharacters(in: .whitespaces)
       if !name.isEmpty { names.insert(name.lowercased()) }
     }
     return names

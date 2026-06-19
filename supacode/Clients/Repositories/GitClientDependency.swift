@@ -56,6 +56,9 @@ struct GitClientDependency: Sendable {
   var lineChanges: @Sendable (URL) async -> (added: Int, removed: Int)?
   var remoteNames: @Sendable (_ repoRoot: URL) async throws -> [String]
   var fetchRemote: @Sendable (_ remote: String, _ repoRoot: URL) async throws -> Void
+  /// Pushes a worktree's branch/bookmark to its remote for PR prep. Routed:
+  /// jj → `jj git push --bookmark`; git → `git push -u origin`.
+  var pushBranch: @Sendable (_ name: String, _ repoRoot: URL) async throws -> Void
   var remoteInfo: @Sendable (_ repositoryRoot: URL) async -> GithubRemoteInfo?
 }
 
@@ -176,6 +179,12 @@ extension GitClientDependency: DependencyKey {
         return try await JJClient().fetch(remote: remote, repoRoot: repoRoot)
       }
       try await GitClient().fetchRemote(remote, for: repoRoot)
+    },
+    pushBranch: { name, repoRoot in
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        return try await JJClient().pushBookmark(named: name, remote: nil, repoRoot: repoRoot)
+      }
+      try await GitClient().pushBranch(name, for: repoRoot)
     },
     remoteInfo: { repositoryRoot in
       await GitClient().remoteInfo(for: repositoryRoot)

@@ -207,9 +207,10 @@ struct JJClientTests {
 
   @Test func bookmarkNamesParsesLocalBookmarksLowercased() async throws {
     let recorder = JJCommandRecorder()
+    // `-T 'name() ++ "\n"'` emits one bare bookmark name per line.
     let shell = makeRecordingShell(
       recorder: recorder,
-      bookmarkList: "Main: qpv 123 (empty)\nfeature/x: abc 456\n  (some indented continuation)\n"
+      bookmarkList: "Main\nfeature/x\n"
     )
     let names = try await JJClient(shell: shell).bookmarkNames(for: URL(fileURLWithPath: "/tmp/repo"))
     #expect(names == ["main", "feature/x"])

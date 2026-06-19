@@ -16,6 +16,7 @@ struct WorktreeCommand: ParsableCommand {
       Delete.self,
       Pin.self,
       Unpin.self,
+      Push.self,
     ],
     defaultSubcommand: Focus.self
   )
@@ -157,6 +158,20 @@ extension WorktreeCommand {
     func run() throws {
       let id = try resolveWorktreeID(worktree)
       try Dispatcher.dispatch(deeplinkURL: DeeplinkURLBuilder.worktreeAction("unpin", worktreeID: id))
+    }
+  }
+
+  struct Push: ParsableCommand {
+    static let configuration = CommandConfiguration(
+      abstract: "Push the worktree's branch/bookmark to its remote (for PR prep)."
+    )
+
+    @Option(name: [.short, .long], help: "Worktree ID. Defaults to $SUPACODE_WORKTREE_ID.")
+    var worktree: String?
+
+    func run() throws {
+      let id = try resolveWorktreeID(worktree)
+      try Dispatcher.dispatch(deeplinkURL: DeeplinkURLBuilder.worktreeAction("push", worktreeID: id))
     }
   }
 }

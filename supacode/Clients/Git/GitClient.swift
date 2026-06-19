@@ -23,6 +23,7 @@ enum GitOperation: String {
   case remoteInfo = "remote_info"
   case remoteList = "remote_list"
   case fetchOrigin = "fetch_origin"
+  case pushBranch = "push_branch"
 }
 
 enum GitClientError: LocalizedError {
@@ -414,6 +415,16 @@ struct GitClient {
     _ = try await runGit(
       operation: .fetchOrigin,
       arguments: ["-C", path, "fetch", remote]
+    )
+  }
+
+  /// Pushes a branch to `origin` and sets upstream, for PR prep — the git
+  /// counterpart to `JJClient.pushBookmark`.
+  nonisolated func pushBranch(_ name: String, for repoRoot: URL) async throws {
+    let path = repoRoot.path(percentEncoded: false)
+    _ = try await runGit(
+      operation: .pushBranch,
+      arguments: ["-C", path, "push", "-u", "origin", name]
     )
   }
 

@@ -1439,7 +1439,7 @@ struct AppFeature {
     case .surface(_, _, let input):
       spawnsShell = input?.isEmpty == false
     case .select, .stop, .stopScript, .tab, .tabDestroy, .surfaceDestroy,
-      .archive, .unarchive, .delete, .pin, .unpin:
+      .archive, .unarchive, .delete, .pin, .unpin, .push:
       spawnsShell = false
     }
     if spawnsShell, let worktree = state.repositories.worktree(for: worktreeID), worktree.isMissing {
@@ -1496,6 +1496,8 @@ struct AppFeature {
       return .send(.repositories(.pinWorktree(worktreeID)))
     case .unpin:
       return .send(.repositories(.unpinWorktree(worktreeID)))
+    case .push:
+      return .send(.repositories(.pushWorktreeBookmark(worktreeID)))
     case .tab(let tabID):
       guard validateTab(worktreeID: worktreeID, tabID: tabID, state: &state) else { return .none }
       return sendTerminalCommand(worktreeID: worktreeID, state: state) { worktree in

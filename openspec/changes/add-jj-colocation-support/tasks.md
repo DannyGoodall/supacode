@@ -44,9 +44,9 @@
 
 - [x] 6.1 Branch rename → `jj bookmark rename` (routed; rename flow works for jj workspaces); delete → `jj bookmark delete` (via `removeWorkspace`, Phase 5). ⏳ Follow-up: re-author `RenameBranchFeature` stderr translation for jj messages + detect conflicted bookmarks (`name??`).
 - [x] 6.2 Map fetch to `jj git fetch` (routed `fetchRemote`/`remoteNames`)
-- [~] 6.3 Bookmark push backend done (`JJClient.pushBookmark` = `jj git push --bookmark <name> --allow-new`). ⏳ Surface (toolbar action + CLI `worktree push` + `supacode://…/push` deeplink + reducer action) is the next slice — placement TBD.
+- [x] 6.3 Bookmark push: backend (`JJClient.pushBookmark`) + surface as **CLI + deeplink** (`supacode worktree push`, `supacode://worktree/<id>/push` → `RepositoriesFeature.pushWorktreeBookmark` → routed `GitClientDependency.pushBranch`). Toolbar action intentionally omitted (user chose CLI/deeplink). Push also works for git worktrees (`git push -u origin`).
 - [x] 6.4 No code: GitHub PR tracking matches by `headRefName` = the pushed bookmark/branch name, so a pushed bookmark is tracked exactly like a git branch (the `gh`/GraphQL path is backend-agnostic).
-- [x] 6.5 Existing CLI/deeplink verbs (`repo worktree-new`, `worktree delete`, rename) already route to the jj backend — they dispatch the same reducer actions → routed `GitClientDependency` closures. ⏳ Only the new `push` verb remains (part of 6.3's surface).
+- [x] 6.5 Existing CLI/deeplink verbs (`repo worktree-new`, `worktree delete`, rename) already route to the jj backend — they dispatch the same reducer actions → routed `GitClientDependency` closures. New `push` verb added (6.3).
 - [x] 6.6 Tests: bookmark name parsing, rename, fetch, push command shapes (`JJClientTests`). ⏳ Reducer-level routing test still deferred to Phase 8.
 
 ## 7. Working-copy watcher

@@ -121,6 +121,8 @@ private nonisolated enum DeeplinkParser {
       return .worktree(id: worktreeID, action: .pin)
     case "unpin":
       return .worktree(id: worktreeID, action: .unpin)
+    case "push":
+      return .worktree(id: worktreeID, action: .push)
     case "tab":
       return parseWorktreeTab(
         worktreeID: worktreeID,
