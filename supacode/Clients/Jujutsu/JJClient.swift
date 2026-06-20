@@ -140,10 +140,13 @@ struct JJClient {
     "local_bookmarks.map(|b| b.name()).join(\",\") ++ \"\\n\""
 
   /// Tab-separated `bookmarks ⇥ change-id-prefix ⇥ change-id-rest` for a single
-  /// revision; `change_id.shortest()` yields the shortest unique prefix.
+  /// revision. `shortest(8)` mirrors jj's default log: `.prefix()` is the
+  /// shortest UNIQUE prefix (highlighted) and `.rest()` pads to 8 chars (dim).
+  /// Plain `shortest()` would leave `.rest()` empty (its "shortest" form is just
+  /// the unique prefix), which hid the dim remainder.
   nonisolated private static let headTemplate =
     "local_bookmarks.map(|b| b.name()).join(\",\") ++ \"\\t\""
-    + " ++ change_id.shortest().prefix() ++ \"\\t\" ++ change_id.shortest().rest() ++ \"\\n\""
+    + " ++ change_id.shortest(8).prefix() ++ \"\\t\" ++ change_id.shortest(8).rest() ++ \"\\n\""
 
   /// First bookmark from the comma-joined template output (empty when none).
   nonisolated private static func firstBookmark(from output: String?) -> String {
