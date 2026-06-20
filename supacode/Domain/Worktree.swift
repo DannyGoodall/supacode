@@ -25,6 +25,10 @@ struct Worktree: Identifiable, Hashable, Sendable {
   /// jj change id of `@` (prefix + rest), for the jj-native row label. `nil`
   /// for git. Sourced at enumeration; refreshed live by the op-log watcher.
   let jjChangeId: ChangeIdDisplay?
+  /// The jj workspace name (e.g. `ws2`), captured at enumeration. `nil` for git.
+  /// Lets the watcher fall back to it for an anonymous `@` WITHOUT re-running
+  /// `jj workspace list` + per-workspace `root --name` on every op.
+  let jjWorkspaceName: String?
 
   nonisolated init(
     id: String,
@@ -35,7 +39,8 @@ struct Worktree: Identifiable, Hashable, Sendable {
     createdAt: Date? = nil,
     isMissing: Bool = false,
     isAttached: Bool = true,
-    jjChangeId: ChangeIdDisplay? = nil
+    jjChangeId: ChangeIdDisplay? = nil,
+    jjWorkspaceName: String? = nil
   ) {
     self.id = id
     self.name = name
@@ -46,6 +51,7 @@ struct Worktree: Identifiable, Hashable, Sendable {
     self.isMissing = isMissing
     self.isAttached = isAttached
     self.jjChangeId = jjChangeId
+    self.jjWorkspaceName = jjWorkspaceName
   }
 }
 

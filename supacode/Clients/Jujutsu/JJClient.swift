@@ -54,7 +54,8 @@ struct JJClient {
           createdAt: createdAt,
           isMissing: false,
           isAttached: isAttached,
-          jjChangeId: head.changeId
+          jjChangeId: head.changeId,
+          jjWorkspaceName: name
         )
       )
     }
@@ -103,23 +104,18 @@ struct JJClient {
   /// Bookmark at `@` for the workspace rooted at `workspaceURL` (the jj
   /// counterpart to `GitClient.branchName`). nil when there is no bookmark or
   /// jj fails.
+  /// Bookmark at `@` for the workspace (jj counterpart to `GitClient.branchName`).
+  /// `nil` when `@` is anonymous — the caller (the reducer's branch handler)
+  /// falls back to the cached `Worktree.jjWorkspaceName`, so we DON'T re-run the
+  /// expensive `jj workspace list` + per-workspace `root --name` enumeration on
+  /// every op (that was the ~5s anonymous-`@` latency). One cheap `jj log`.
   nonisolated func branchName(forWorkspaceAt workspaceURL: URL) async -> String? {
-    let url = workspaceURL.standardizedFileURL
     let output = try? await runJJ(
       ["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", Self.bookmarkTemplate],
-      cwd: url
+      cwd: workspaceURL.standardizedFileURL
     )
     let bookmark = Self.firstBookmark(from: output)
-    if !bookmark.isEmpty { return bookmark }
-    // Anonymous `@` (no bookmark) — fall back to the workspace name so the
-    // watcher CLEARS a stale bookmark label after `jj new` moves `@` off a
-    // bookmark (matching the listing's "bookmark else workspace name" rule).
-    // This enumerates (`jj workspace list` + per-workspace `root --name`),
-    // which is why it must NOT run on a hot path — it's safe now ONLY because
-    // the sole caller is the op-log watcher (`gitClient.branchName`, fired on
-    // real jj operations, not continuously). Do not call branchName from a
-    // per-render / per-tick path.
-    return try? await workspaceName(forPath: url, repoRoot: url)
+    return bookmark.isEmpty ? nil : bookmark
   }
 
   /// Line changes for the workspace at `workspaceURL` via `jj diff --stat -r @`.
@@ -261,7 +257,8 @@ struct JJClient {
       repositoryRootURL: repositoryRootURL,
       createdAt: createdAt,
       isMissing: false,
-      isAttached: true
+      isAttached: true,
+      jjWorkspaceName: name
     )
   }
 

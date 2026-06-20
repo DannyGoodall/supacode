@@ -274,7 +274,9 @@ private struct TitleView: View, Equatable {
       let titleText = Text(name)
         .font(.body)
         .lineLimit(1)
-      HStack(spacing: 5) {
+      // `.firstTextBaseline` so the change id sits on the name's baseline
+      // (bottom-aligned look) rather than centering the smaller text up top.
+      HStack(alignment: .firstTextBaseline, spacing: 5) {
         Group {
           if let customTint, !isEmphasized {
             titleText.foregroundStyle(customTint.color).shimmer(isActive: isBusy)
@@ -289,7 +291,7 @@ private struct TitleView: View, Equatable {
             .fontWeight(.semibold)
             .foregroundStyle(isEmphasized ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
             + Text(jjChangeId.rest).foregroundStyle(.secondary))
-            .font(.system(.caption2, design: .monospaced))
+            .font(.system(.caption, design: .monospaced))
             .lineLimit(1)
         }
       }

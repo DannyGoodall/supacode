@@ -2837,9 +2837,13 @@ struct RepositoriesFeature {
             return .none
           }
           let worktreeURL = worktree.workingDirectory
+          // For an anonymous jj `@` (no bookmark) fall back to the cached
+          // workspace name so the watcher clears a stale bookmark WITHOUT
+          // re-enumerating workspaces (the ~5s latency). `nil` for git.
+          let jjWorkspaceFallback = worktree.jjWorkspaceName
           let gitClient = gitClient
           return .run { send in
-            if let name = await gitClient.branchName(worktreeURL) {
+            if let name = await gitClient.branchName(worktreeURL) ?? jjWorkspaceFallback {
               await send(.worktreeBranchNameLoaded(worktreeID: worktreeID, name: name))
             }
             // Refresh the jj change-id chip in lockstep with the branch label
@@ -4939,6 +4943,7 @@ extension RepositoriesFeature.State {
         isMissing: worktree.isMissing,
         isAttached: worktree.isAttached,
         jjChangeId: worktree.jjChangeId,
+        jjWorkspaceName: worktree.jjWorkspaceName,
       )
       repositories[index] = repository.replacingWorktrees(worktrees)
       return
