@@ -144,19 +144,19 @@ private struct WorktreeMainMenu: Commands {
       }
       .appKeyboardShortcut(selectPrevious)
       .help("Select Previous (\(selectPrevious?.display ?? "none"))")
-      Button("Back in Worktree History", systemImage: "chevron.left") {
+      Button("Back in \(vocab.workspaceNoun) History", systemImage: "chevron.left") {
         store.send(.repositories(.worktreeHistoryBack))
       }
       .appKeyboardShortcut(historyBack)
-      .help("Back in Worktree History (\(historyBack?.display ?? "none"))")
+      .help("Back in \(vocab.workspaceNoun) History (\(historyBack?.display ?? "none"))")
       .disabled(!snapshot.canNavigateBackward)
-      Button("Forward in Worktree History", systemImage: "chevron.right") {
+      Button("Forward in \(vocab.workspaceNoun) History", systemImage: "chevron.right") {
         store.send(.repositories(.worktreeHistoryForward))
       }
       .appKeyboardShortcut(historyForward)
-      .help("Forward in Worktree History (\(historyForward?.display ?? "none"))")
+      .help("Forward in \(vocab.workspaceNoun) History (\(historyForward?.display ?? "none"))")
       .disabled(!snapshot.canNavigateForward)
-      Menu("Select Worktree") {
+      Menu("Select \(vocab.workspaceNoun)") {
         SelectWorktreeSubmenuItems(store: store, overrides: overrides)
       }
     }
