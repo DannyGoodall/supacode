@@ -8,13 +8,17 @@ struct RenameBranchView: View {
   var body: some View {
     Form {
       Section {
-        TextField("Branch Name", text: $store.newName, prompt: Text(store.currentName))
+        TextField("\(store.vocab.bookmarkNoun) Name", text: $store.newName, prompt: Text(store.currentName))
           .focused($isNameFocused)
           .disabled(store.isSubmitting)
           .onSubmit { submit() }
       } header: {
-        Text("Rename Branch")
-        Text("Rename `\(store.currentName)` to a new local branch name.")
+        Text(store.vocab.renameTitle)
+        Text(
+          store.vocab.isJJ
+            ? "Rename `\(store.currentName)` to a new bookmark name."
+            : "Rename `\(store.currentName)` to a new local branch name."
+        )
       } footer: {
         if let validationMessage = store.validationMessage, !validationMessage.isEmpty {
           Text(validationMessage)

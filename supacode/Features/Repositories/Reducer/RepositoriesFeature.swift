@@ -947,7 +947,8 @@ struct RepositoriesFeature {
           selectedBaseRef: selectedBaseRef,
           fetchOrigin: promptSettingsFile.global.fetchOriginBeforeWorktreeCreation,
           defaultWorktreeBaseDirectory: defaultWorktreeBaseDirectory,
-          validationMessage: nil
+          validationMessage: nil,
+          isColocatedJJ: state.usesJujutsuBackend(forRepository: repository.id)
         )
         return .none
 
@@ -3569,7 +3570,8 @@ struct RepositoriesFeature {
           worktreeID: worktreeID,
           repositoryID: repositoryID,
           repositoryRootURL: repository.rootURL,
-          currentName: worktree.name
+          currentName: worktree.name,
+          isColocatedJJ: state.usesJujutsuBackend(forRepository: repositoryID)
         )
         return .none
 
