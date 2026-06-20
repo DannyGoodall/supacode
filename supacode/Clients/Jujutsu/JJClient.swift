@@ -26,15 +26,9 @@ struct JJClient {
     let fileManager = FileManager.default
     var worktrees: [Worktree] = []
     for name in names {
-      guard
-        let pathOutput = try? await runJJ(
-          ["workspace", "root", "--name", name, "--ignore-working-copy"],
-          cwd: repositoryRootURL
-        )
-      else { continue }
-      let trimmedPath = pathOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !trimmedPath.isEmpty else { continue }
-      let workspaceURL = URL(fileURLWithPath: trimmedPath).standardizedFileURL
+      guard let workspaceURL = await workspaceRootURL(named: name, repoRoot: repositoryRootURL) else {
+        continue
+      }
       guard fileManager.fileExists(atPath: workspaceURL.path(percentEncoded: false)) else {
         continue
       }
@@ -181,6 +175,14 @@ struct JJClient {
     // no-trailing-slash path the listing derives via `jj workspace root --name`
     // for the same directory.
     let targetURL = (directoryOverride ?? baseDirectory.appending(path: name)).standardizedFileURL
+    // `jj workspace add` doesn't create missing parent directories, whereas the
+    // git path (`wt`) creates the base dir. Mirror that so a first workspace
+    // under a not-yet-existing base (e.g. ~/.supacode/repos/<repo>/) doesn't
+    // fail with "Cannot access … No such file or directory".
+    try FileManager.default.createDirectory(
+      at: targetURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
     var addArguments = ["workspace", "add", targetURL.path(percentEncoded: false), "--name", name]
     if let revset = await revset(forBaseRef: baseRef, repoRoot: repositoryRootURL) {
       addArguments += ["-r", revset]
@@ -189,13 +191,19 @@ struct JJClient {
     // Auto-create the bookmark at the new workspace's working-copy commit.
     // Best-effort: a name collision shouldn't fail the whole create.
     _ = try? await runJJ(["bookmark", "create", name, "-r", "\(name)@"], cwd: repositoryRootURL)
-    let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: targetURL)
-    let createdAt = try? targetURL.resourceValues(forKeys: [.creationDateKey]).creationDate
+    // Build the Worktree from the SAME canonical path the listing enumerates
+    // via `jj workspace root --name` (jj may canonicalize symlinks/firmlinks,
+    // so it can differ from `targetURL`). If they differ, the post-create
+    // reload would treat this worktree's id as removed — tearing down its
+    // freshly-opened terminal — then re-add it under the canonical id.
+    let canonicalURL = await workspaceRootURL(named: name, repoRoot: repositoryRootURL) ?? targetURL
+    let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: canonicalURL)
+    let createdAt = try? canonicalURL.resourceValues(forKeys: [.creationDateKey]).creationDate
     return Worktree(
-      id: targetURL.path(percentEncoded: false),
+      id: canonicalURL.path(percentEncoded: false),
       name: name,
       detail: detail,
-      workingDirectory: targetURL,
+      workingDirectory: canonicalURL,
       repositoryRootURL: repositoryRootURL,
       createdAt: createdAt,
       isMissing: false,
@@ -231,17 +239,27 @@ struct JJClient {
   nonisolated private func workspaceName(forPath path: URL, repoRoot: URL) async throws -> String? {
     let target = path.standardizedFileURL.path(percentEncoded: false)
     for name in try await workspaceNames(for: repoRoot) {
-      guard
-        let rootOutput = try? await runJJ(
-          ["workspace", "root", "--name", name, "--ignore-working-copy"],
-          cwd: repoRoot
-        )
-      else { continue }
-      let resolved = URL(fileURLWithPath: rootOutput.trimmingCharacters(in: .whitespacesAndNewlines))
-        .standardizedFileURL.path(percentEncoded: false)
-      if resolved == target { return name }
+      guard let resolved = await workspaceRootURL(named: name, repoRoot: repoRoot) else { continue }
+      if resolved.path(percentEncoded: false) == target { return name }
     }
     return nil
+  }
+
+  /// Canonical root URL of workspace `name` via `jj workspace root --name`.
+  /// `nil` on command failure or empty output. `--ignore-working-copy` keeps
+  /// the read from auto-snapshotting; `.standardizedFileURL` is the same
+  /// canonicalization the listing uses, so create / list / forget stay in
+  /// lockstep on the workspace id.
+  nonisolated private func workspaceRootURL(named name: String, repoRoot: URL) async -> URL? {
+    guard
+      let output = try? await runJJ(
+        ["workspace", "root", "--name", name, "--ignore-working-copy"],
+        cwd: repoRoot
+      )
+    else { return nil }
+    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    return URL(fileURLWithPath: trimmed).standardizedFileURL
   }
 
   /// Maps a base ref to a jj revset: nil for empty (jj defaults to the current
