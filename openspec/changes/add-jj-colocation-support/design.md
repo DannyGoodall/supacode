@@ -17,7 +17,7 @@ The foundation phase (detection + flavor + gate, behind `experimentalJJIntegrati
 - Detect co-located jj and offer jj-native equivalents (workspaces, bookmarks, fetch/push, diff, working-copy watching) for the Git features Supacode already automates.
 - Zero behavior change for non-jj users, and zero change when the experimental gate is off.
 - Preserve the git/none contract so the ~50 existing `isGitRepository` consumers are untouched.
-- Keep one user-facing vocabulary (worktree/branch/new/delete) regardless of backend.
+- **Present jj-native vocabulary and affordances for jj repos** (workspace/bookmark, not worktree/branch), and never offer a git-only action (e.g. Archive) on a jj workspace. *(Revised after Phase-4–7 GUI testing — see Decision 11. The original goal was "keep one vocabulary regardless of backend"; that undershot the requirement to "offer the jj equivalent — workspaces for worktrees, bookmarks for branches," so the presentation layer is now made flavor-aware. The backend-dispatch rationale in Decision 3 is unaffected.)*
 
 **Non-Goals:**
 - Supporting non-colocated jj repositories (no sibling `.git`).
@@ -60,6 +60,11 @@ The foundation phase (detection + flavor + gate, behind `experimentalJJIntegrati
 - *Why:* this is jj's supported, location-independent enumeration — analogous to git's `wt ls --json`. Crucially it discovers **pre-existing and externally-created** workspaces (a repo brought into Supacode with workspaces already present), which a track-on-create registry could not.
 - *Supersedes:* an earlier track-on-create persisted-registry plan (I had missed the `root --name` flag). No registry is needed; nothing extra is persisted for listing.
 - *Note:* `jj workspace add` in a colocated repo is still jj-only (not a git worktree), so git worktree enumeration does not see jj workspaces — `JJBackend` owns listing for jj repos.
+
+**11. jj-native presentation layer (flavor-aware UI), superseding the "one vocabulary" goal.** For a row whose repository is co-located jj (and using the jj backend), the worktree UI presents jj vocabulary — "Workspace"/"Bookmark", "New Workspace…", "Rename Bookmark…", "Forget Workspace…", "Copy as Bookmark Name" — and the new-workspace prompt offers jj revsets/bookmarks rather than git refs. Git-only actions with no jj analogue (Archive/Unarchive) are hidden for jj rows. Plain-git and folder rows are unchanged.
+- *Why:* the backend was made jj-aware in Phases 3–7 but the UI kept hardcoded git strings, so a jj repo looked and read like git (and offered Archive, which on a jj workspace routes through the now-jj `removeWorktree` = `jj workspace forget` + dir delete — destructive, not an archive). GUI testing surfaced this. Presenting jj-native vocabulary is exactly the "offer the jj equivalent" the original request asked for.
+- *Mechanism:* thread the row's flavor (`isColocatedJJ` / a small vocabulary value) to the views via the same seam used elsewhere; views pick labels from a single vocabulary helper keyed off the flavor, so there's one source of truth and no scattered conditionals.
+- *Note (diff-stat semantics, not a bug):* a jj row's line-change stat reflects the `@` working-copy **commit**'s diff (`jj diff -r @ --ignore-working-copy`), i.e. "the size of the current change," whereas git's stat is live uncommitted changes. A fresh jj `@` that already contains committed content shows a non-zero stat; an un-snapshotted external edit shows nothing until the next jj command snapshots. This is inherent to jj's working-copy-as-commit model plus the deliberate `--ignore-working-copy` storm guard.
 
 ## Risks / Trade-offs
 

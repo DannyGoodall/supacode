@@ -61,3 +61,15 @@
 - [x] 8.1 All jointly-relevant tests pass for git / jj+git / none (full suite: 1696 passed under Xcode 26.3)
 - [x] 8.2 `make check` (format + lint) and full `make test` green
 - [x] 8.3 Update CLAUDE.md / docs with the co-located jj behavior and the experimental setting (added "Jujutsu (jj) co-located integration" section to `AGENTS.md`, the real target of the `CLAUDE.md` symlink)
+
+## 9. jj-native presentation layer (added after GUI testing — Decision 11)
+
+The backend routes to jj, but the UI kept hardcoded git vocabulary and offered git-only actions on jj rows. Make the worktree UI flavor-aware for co-located jj repos.
+
+- [ ] 9.0 SAFETY: hide Archive/Unarchive for jj rows (context menu + toolbar). Archiving a jj workspace routes through the jj `removeWorktree` (= `jj workspace forget` + dir delete) — destructive, not an archive. Highest priority.
+- [ ] 9.1 Thread the row's flavor (`isColocatedJJ` / a vocabulary value) to the worktree views (sidebar context menu, `SidebarListView` new-button, toolbar menu, creation prompt, rename UI, `WorktreeDetailView`) via the established seam (look up the repo by the row's `repositoryRootURL`/id, or thread a field like the settings summary did).
+- [ ] 9.2 Single vocabulary helper keyed off flavor (Workspace/Bookmark nouns + the action labels) so there's one source of truth, no scattered conditionals.
+- [ ] 9.3 Relabel for jj rows: "Rename Bookmark…", "Copy as Bookmark Name", "Pin/Unpin Workspace", "Forget Workspace…", "New Workspace…", prompt title/fields, rename UI copy. Git/folder rows unchanged.
+- [ ] 9.4 New-workspace prompt offers jj revsets/bookmarks (not git refs) for jj repos; base ref → revset.
+- [ ] 9.5 Audit every remaining worktree action for jj-correctness; hide/adapt any other git-only affordance surfaced by the audit.
+- [ ] 9.6 Tests: vocabulary helper; flavor-gated label + action selection; Archive hidden for jj; git/folder rows unchanged.
