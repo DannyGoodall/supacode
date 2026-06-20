@@ -54,6 +54,9 @@ struct SidebarItemFeature {
     /// + `preferJJ`); reconcile fans this in per repository. Drives jj-native
     /// row affordances (the bird icon, change-id display).
     var isColocatedJJ: Bool = false
+    /// jj change id of `@` (prefix + rest) for the row label; `nil` for git.
+    /// Seeded from the worktree at reconcile, refreshed live by the watcher.
+    var jjChangeId: ChangeIdDisplay?
     /// Mirror of `SidebarState.Item.title`; reconcile fans this in from
     /// `@Shared(.sidebar)`. `nil` or whitespace-only means fall back to `name`.
     var customTitle: String?

@@ -55,7 +55,8 @@ struct SidebarItemView: View {
           accent: resolved.accent,
           customTint: store.customTint,
           isLifecycleBusy: store.lifecycle.isBusy,
-          isTaskRunning: store.isTaskRunning
+          isTaskRunning: store.isTaskRunning,
+          jjChangeId: store.jjChangeId
         )
         .equatable()
         Spacer(minLength: 0)
@@ -250,6 +251,8 @@ private struct TitleView: View, Equatable {
   let customTint: RepositoryColor?
   let isLifecycleBusy: Bool
   let isTaskRunning: Bool
+  /// jj change id of `@` (prefix + rest); `nil` for git rows.
+  let jjChangeId: ChangeIdDisplay?
   // `==` ignores @Environment; SwiftUI tracks env changes separately.
   @Environment(\.backgroundProminence) private var backgroundProminence
 
@@ -260,6 +263,7 @@ private struct TitleView: View, Equatable {
       && lhs.customTint == rhs.customTint
       && lhs.isLifecycleBusy == rhs.isLifecycleBusy
       && lhs.isTaskRunning == rhs.isTaskRunning
+      && lhs.jjChangeId == rhs.jjChangeId
   }
 
   var body: some View {
@@ -270,10 +274,24 @@ private struct TitleView: View, Equatable {
       let titleText = Text(name)
         .font(.body)
         .lineLimit(1)
-      if let customTint, !isEmphasized {
-        titleText.foregroundStyle(customTint.color).shimmer(isActive: isBusy)
-      } else {
-        titleText.shimmer(isActive: isBusy)
+      HStack(spacing: 5) {
+        Group {
+          if let customTint, !isEmphasized {
+            titleText.foregroundStyle(customTint.color).shimmer(isActive: isBusy)
+          } else {
+            titleText.shimmer(isActive: isBusy)
+          }
+        }
+        .layoutPriority(1)
+        // jj change id: bold the shortest-unique prefix, dim the rest (jj-style).
+        if let jjChangeId {
+          (Text(jjChangeId.prefix)
+            .fontWeight(.semibold)
+            .foregroundStyle(isEmphasized ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
+            + Text(jjChangeId.rest).foregroundStyle(.secondary))
+            .font(.system(.caption2, design: .monospaced))
+            .lineLimit(1)
+        }
       }
       switch subtitle {
       case .none:
@@ -325,7 +343,7 @@ private struct IconView: View {
       worktreeName: branchName,
       pullRequest: showsPullRequestInfo ? pullRequest : nil,
     )
-    HStack(spacing: 3) {
+    HStack(alignment: .top, spacing: 1) {
       IconContent(
         isFolder: isFolder,
         isMissing: isMissing,
@@ -334,12 +352,14 @@ private struct IconView: View {
         rowState: IconRowState(lifecycle),
       )
       .equatable()
-      // Distinguish jj workspaces/bookmarks from git worktrees/branches.
+      // Distinguish jj workspaces/bookmarks from git worktrees/branches. Small,
+      // tucked tight against the top of the branch glyph. (SF Symbol — the
+      // branch glyph itself is the custom `git-branch` asset.)
       if isColocatedJJ, !isFolder {
         Image(systemName: "bird")
           .resizable()
           .aspectRatio(contentMode: .fit)
-          .frame(width: 11, height: 11)
+          .frame(width: 9, height: 9)
           .foregroundStyle(.secondary)
           .accessibilityLabel("Jujutsu")
       }

@@ -67,6 +67,7 @@ extension RepositoriesFeature {
         item.isPinned = isPinned
         item.isMissing = worktree.isMissing
         item.isColocatedJJ = isColocatedJJ
+        item.jjChangeId = worktree.jjChangeId
         // Mirror per-worktree customization from `@Shared(.sidebar)`. Reading
         // through the currently-owning bucket survives pin / unpin / archive
         // transitions because the bucket-flow `move` carries the `Item` over.
@@ -108,7 +109,6 @@ extension RepositoriesFeature {
           )
         item.name = pendingName
         item.branchName = pendingName
-        item.isColocatedJJ = isColocatedJJ
         item.customTitle = pending.customization?.title
         item.customTint = pending.customization?.color
         item.lifecycle =

@@ -386,6 +386,7 @@ struct RepositoriesFeature {
     case worktreeInfoEvent(WorktreeInfoWatcherClient.Event)
     case worktreeNotificationReceived(Worktree.ID)
     case worktreeBranchNameLoaded(worktreeID: Worktree.ID, name: String)
+    case worktreeChangeIdLoaded(worktreeID: Worktree.ID, changeId: ChangeIdDisplay?)
     case worktreeLineChangesLoaded(worktreeID: Worktree.ID, added: Int, removed: Int)
     case refreshGithubIntegrationAvailability
     case githubIntegrationAvailabilityUpdated(Bool)
@@ -2841,6 +2842,14 @@ struct RepositoriesFeature {
             if let name = await gitClient.branchName(worktreeURL) {
               await send(.worktreeBranchNameLoaded(worktreeID: worktreeID, name: name))
             }
+            // Refresh the jj change-id chip in lockstep with the branch label
+            // (nil for git, so this is a no-op there).
+            await send(
+              .worktreeChangeIdLoaded(
+                worktreeID: worktreeID,
+                changeId: await gitClient.jjChangeId(worktreeURL)
+              )
+            )
           }
         case .filesChanged(let worktreeID):
           guard let worktree = state.worktree(for: worktreeID) else {
@@ -3021,6 +3030,12 @@ struct RepositoriesFeature {
       case .worktreeBranchNameLoaded(let worktreeID, let name):
         state.updateWorktreeName(worktreeID, name: name)
         Self.syncSidebar(&state)
+        return .none
+
+      case .worktreeChangeIdLoaded(let worktreeID, let changeId):
+        // Display-only: refresh the row's change-id chip. Per-leaf mutation, so
+        // it invalidates only this row's view, not the whole structure.
+        state.sidebarItems[id: worktreeID]?.jjChangeId = changeId
         return .none
 
       case .worktreeLineChangesLoaded(let worktreeID, let added, let removed):
@@ -4923,6 +4938,7 @@ extension RepositoriesFeature.State {
         createdAt: worktree.createdAt,
         isMissing: worktree.isMissing,
         isAttached: worktree.isAttached,
+        jjChangeId: worktree.jjChangeId,
       )
       repositories[index] = repository.replacingWorktrees(worktrees)
       return

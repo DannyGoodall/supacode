@@ -36,8 +36,8 @@ struct JJClient {
       // exists; otherwise fall back to the workspace name. An anonymous
       // workspace (no bookmark) is treated as not attached, mirroring a
       // detached-HEAD git worktree.
-      let bookmark = await bookmarkAtWorkspace(named: name, repoRoot: repositoryRootURL)
-      let isAttached = !bookmark.isEmpty
+      let head = await headInfo(named: name, repoRoot: repositoryRootURL)
+      let isAttached = !head.bookmark.isEmpty
       let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: workspaceURL)
       let id = workspaceURL.path(percentEncoded: false)
       let resourceValues = try? workspaceURL.resourceValues(forKeys: [
@@ -47,13 +47,14 @@ struct JJClient {
       worktrees.append(
         Worktree(
           id: id,
-          name: isAttached ? bookmark : name,
+          name: isAttached ? head.bookmark : name,
           detail: detail,
           workingDirectory: workspaceURL,
           repositoryRootURL: repositoryRootURL,
           createdAt: createdAt,
           isMissing: false,
-          isAttached: isAttached
+          isAttached: isAttached,
+          jjChangeId: head.changeId
         )
       )
     }
@@ -74,15 +75,29 @@ struct JJClient {
       .filter { !$0.isEmpty }
   }
 
-  /// Bookmark name at the working-copy commit of workspace `name`, resolved
-  /// from the primary via the `<name>@` revset. Empty when the workspace is
-  /// anonymous; jj errors are swallowed to empty.
-  nonisolated private func bookmarkAtWorkspace(named name: String, repoRoot: URL) async -> String {
+  /// Bookmark + change id at the working-copy commit of workspace `name`,
+  /// resolved from the primary via the `<name>@` revset in a single `jj log`
+  /// call (no extra subprocess per workspace). Bookmark is empty when anonymous.
+  nonisolated private func headInfo(
+    named name: String,
+    repoRoot: URL
+  ) async -> (bookmark: String, changeId: ChangeIdDisplay?) {
     let output = try? await runJJ(
-      ["log", "--ignore-working-copy", "--no-graph", "-r", "\(name)@", "-T", Self.bookmarkTemplate],
+      ["log", "--ignore-working-copy", "--no-graph", "-r", "\(name)@", "-T", Self.headTemplate],
       cwd: repoRoot
     )
-    return Self.firstBookmark(from: output)
+    return Self.parseHead(output)
+  }
+
+  /// Change id of `@` for the workspace rooted at `workspaceURL` — the watcher
+  /// refreshes this live alongside `branchName`. Cheap single `jj log`; safe on
+  /// the (quiet) op-log watcher path.
+  nonisolated func changeId(forWorkspaceAt workspaceURL: URL) async -> ChangeIdDisplay? {
+    let output = try? await runJJ(
+      ["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", Self.headTemplate],
+      cwd: workspaceURL.standardizedFileURL
+    )
+    return Self.parseHead(output).changeId
   }
 
   /// Bookmark at `@` for the workspace rooted at `workspaceURL` (the jj
@@ -124,6 +139,12 @@ struct JJClient {
   nonisolated private static let bookmarkTemplate =
     "local_bookmarks.map(|b| b.name()).join(\",\") ++ \"\\n\""
 
+  /// Tab-separated `bookmarks ⇥ change-id-prefix ⇥ change-id-rest` for a single
+  /// revision; `change_id.shortest()` yields the shortest unique prefix.
+  nonisolated private static let headTemplate =
+    "local_bookmarks.map(|b| b.name()).join(\",\") ++ \"\\t\""
+    + " ++ change_id.shortest().prefix() ++ \"\\t\" ++ change_id.shortest().rest() ++ \"\\n\""
+
   /// First bookmark from the comma-joined template output (empty when none).
   nonisolated private static func firstBookmark(from output: String?) -> String {
     guard let output else { return "" }
@@ -135,6 +156,26 @@ struct JJClient {
     return line.split(separator: ",").first.map(String.init) ?? line
   }
 
+  /// Parses `headTemplate` output into the first bookmark + the change id.
+  nonisolated private static func parseHead(
+    _ output: String?
+  ) -> (bookmark: String, changeId: ChangeIdDisplay?) {
+    guard
+      let line = output?.split(whereSeparator: \.isNewline)
+        .map(String.init)
+        .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+    else {
+      return ("", nil)
+    }
+    let fields = line.components(separatedBy: "\t")
+    let bookmarks = fields.first ?? ""
+    let bookmark = bookmarks.split(separator: ",").first.map(String.init)?
+      .trimmingCharacters(in: .whitespaces) ?? ""
+    let prefix = fields.count > 1 ? fields[1].trimmingCharacters(in: .whitespaces) : ""
+    let rest = fields.count > 2 ? fields[2].trimmingCharacters(in: .whitespaces) : ""
+    let changeId = (prefix + rest).isEmpty ? nil : ChangeIdDisplay(prefix: prefix, rest: rest)
+    return (bookmark, changeId)
+  }
   // MARK: - Create
 
   /// Streaming create matching `GitClient.createWorktreeStream`'s event shape.
