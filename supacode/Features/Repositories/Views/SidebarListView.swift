@@ -328,18 +328,19 @@ private struct SidebarSectionActionsView: View {
     }
     .menuStyle(.secondaryToolbar)
 
+    let newLabel = store.state.worktreeVocabulary(forRepository: repositoryID).newWorktree
     Button {
       store.send(.createRandomWorktreeInRepository(repositoryID))
     } label: {
       Image(systemName: "plus")
-        .accessibilityLabel("New Worktree")
+        .accessibilityLabel(newLabel)
         .frame(maxHeight: .infinity)
         .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
     .disabled(isRemovingRepository)
     .foregroundStyle(.secondary)
-    .help("New Worktree")
+    .help(newLabel)
     .padding(.trailing, 4)
   }
 }

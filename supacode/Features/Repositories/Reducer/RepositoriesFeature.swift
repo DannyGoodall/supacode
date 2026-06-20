@@ -4340,6 +4340,24 @@ extension RepositoriesFeature.State {
     return nil
   }
 
+  /// Whether the given repository's rows use the Jujutsu backend (and so should
+  /// present jj-native vocabulary). A root is only classified `.gitColocatedJJ`
+  /// when the experimental gate is on, so this just layers the per-repo
+  /// `preferJJ` override on top of the flavor — matching
+  /// `GitClientDependency.shouldUseJujutsuBackend(for:)`.
+  func usesJujutsuBackend(forRepository id: Repository.ID) -> Bool {
+    guard let repository = repositories[id: id], repository.vcs == .gitColocatedJJ else {
+      return false
+    }
+    @SharedReader(.repositorySettings(repository.rootURL)) var settings
+    return Repository.usesJujutsuBackend(vcs: repository.vcs, preferJJ: settings.preferJJ)
+  }
+
+  /// The flavor-aware label set for a repository's worktree rows.
+  func worktreeVocabulary(forRepository id: Repository.ID) -> WorktreeVocabulary {
+    usesJujutsuBackend(forRepository: id) ? .jujutsu : .git
+  }
+
   /// Tint colors for scripts currently running in the given worktree,
   /// ordered deterministically by script ID. Snapshotted at run-time so a
   /// live color edit only takes effect on the next run; this also keeps
