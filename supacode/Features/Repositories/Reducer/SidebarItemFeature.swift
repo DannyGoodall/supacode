@@ -50,6 +50,10 @@ struct SidebarItemFeature {
     var hasMergedBadge: Bool
     /// Mirror of `Worktree.isMissing`; drives the orphan row UI.
     var isMissing: Bool = false
+    /// Whether this row's repository uses the jj backend (co-located + the gate
+    /// + `preferJJ`); reconcile fans this in per repository. Drives jj-native
+    /// row affordances (the bird icon, change-id display).
+    var isColocatedJJ: Bool = false
     /// Mirror of `SidebarState.Item.title`; reconcile fans this in from
     /// `@Shared(.sidebar)`. `nil` or whitespace-only means fall back to `name`.
     var customTitle: String?

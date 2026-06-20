@@ -72,7 +72,8 @@ struct SidebarItemView: View {
         branchName: store.branchName,
         pullRequest: store.pullRequest,
         showsPullRequestInfo: showsPullRequestInfo,
-        lifecycle: store.lifecycle
+        lifecycle: store.lifecycle,
+        isColocatedJJ: store.isColocatedJJ
       )
     }
     .labelStyle(.verticallyCentered)
@@ -317,20 +318,32 @@ private struct IconView: View {
   let pullRequest: GithubPullRequest?
   let showsPullRequestInfo: Bool
   let lifecycle: SidebarItemFeature.State.Lifecycle
+  let isColocatedJJ: Bool
 
   var body: some View {
     let display = WorktreePullRequestDisplay(
       worktreeName: branchName,
       pullRequest: showsPullRequestInfo ? pullRequest : nil,
     )
-    IconContent(
-      isFolder: isFolder,
-      isMissing: isMissing,
-      icon: SidebarPullRequestIcon.resolve(display.pullRequest),
-      checkBadgeState: resolveCheckBadgeState(display.pullRequest),
-      rowState: IconRowState(lifecycle),
-    )
-    .equatable()
+    HStack(spacing: 3) {
+      IconContent(
+        isFolder: isFolder,
+        isMissing: isMissing,
+        icon: SidebarPullRequestIcon.resolve(display.pullRequest),
+        checkBadgeState: resolveCheckBadgeState(display.pullRequest),
+        rowState: IconRowState(lifecycle),
+      )
+      .equatable()
+      // Distinguish jj workspaces/bookmarks from git worktrees/branches.
+      if isColocatedJJ, !isFolder {
+        Image(systemName: "bird")
+          .resizable()
+          .aspectRatio(contentMode: .fit)
+          .frame(width: 11, height: 11)
+          .foregroundStyle(.secondary)
+          .accessibilityLabel("Jujutsu")
+      }
+    }
   }
 }
 
