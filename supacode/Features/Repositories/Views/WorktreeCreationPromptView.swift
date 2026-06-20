@@ -91,7 +91,9 @@ private struct WorktreeOptionsSection: View {
     Section("Advanced", isExpanded: $store.showAdvancedOptions) {
       // Title-string fields so tapping the label focuses the field, matching
       // the branch-name field above.
-      TextField("\(store.vocab.workspaceNoun) name", text: $store.worktreeNameOverride, prompt: Text(store.worktreeNamePlaceholder))
+      TextField(
+        "\(store.vocab.workspaceNoun) name", text: $store.worktreeNameOverride,
+        prompt: Text(store.worktreeNamePlaceholder))
       TextField("Parent folder", text: $store.worktreePathOverride, prompt: Text(store.defaultWorktreeBaseDirectory))
     }
   }

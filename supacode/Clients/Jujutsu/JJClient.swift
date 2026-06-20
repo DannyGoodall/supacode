@@ -168,7 +168,8 @@ struct JJClient {
     }
     let fields = line.components(separatedBy: "\t")
     let bookmarks = fields.first ?? ""
-    let bookmark = bookmarks.split(separator: ",").first.map(String.init)?
+    let bookmark =
+      bookmarks.split(separator: ",").first.map(String.init)?
       .trimmingCharacters(in: .whitespaces) ?? ""
     let prefix = fields.count > 1 ? fields[1].trimmingCharacters(in: .whitespaces) : ""
     let rest = fields.count > 2 ? fields[2].trimmingCharacters(in: .whitespaces) : ""
