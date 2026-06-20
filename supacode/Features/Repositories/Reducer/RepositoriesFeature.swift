@@ -4358,6 +4358,16 @@ extension RepositoriesFeature.State {
     usesJujutsuBackend(forRepository: id) ? .jujutsu : .git
   }
 
+  /// The flavor-aware label set for the repository that contains the given
+  /// worktree (git vocabulary when the worktree/repo can't be resolved).
+  func worktreeVocabulary(forWorktree id: Worktree.ID?) -> WorktreeVocabulary {
+    guard let id else { return .git }
+    for repository in repositories where repository.worktrees[id: id] != nil {
+      return worktreeVocabulary(forRepository: repository.id)
+    }
+    return .git
+  }
+
   /// Tint colors for scripts currently running in the given worktree,
   /// ordered deterministically by script ID. Snapshotted at run-time so a
   /// live color edit only takes effect on the next run; this also keeps

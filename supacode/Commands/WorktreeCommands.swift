@@ -41,6 +41,7 @@ private struct WorktreeMainMenu: Commands {
       let _: Void = commandsRenderLogger.info("WorktreeMainMenu.body re-rendered")
     #endif
     let snapshot = store.worktreeMenuSnapshot
+    let vocab = snapshot.selectedWorktreeVocabulary
     let overrides = snapshot.shortcutOverrides
     let selectNext = AppShortcuts.selectNextWorktree.effective(from: overrides)
     let selectPrevious = AppShortcuts.selectPreviousWorktree.effective(from: overrides)
@@ -58,11 +59,11 @@ private struct WorktreeMainMenu: Commands {
     let stop = AppShortcuts.stopRunScript.effective(from: overrides)
     let jumpToLatestUnread = AppShortcuts.jumpToLatestUnread.effective(from: overrides)
     CommandMenu("Worktrees") {
-      Button("New Worktree…", systemImage: "plus") {
+      Button(vocab.newWorktreeEllipsis, systemImage: "plus") {
         store.send(.repositories(.createRandomWorktree))
       }
       .appKeyboardShortcut(newWt)
-      .help("New Worktree (\(newWt?.display ?? "none"))")
+      .help("\(vocab.newWorktree) (\(newWt?.display ?? "none"))")
       .disabled(!snapshot.canCreateWorktree)
       Divider()
       let openLabel = openActionSelection.map { "Open in \($0.labelTitle)" } ?? "Open"
@@ -87,30 +88,30 @@ private struct WorktreeMainMenu: Commands {
       .help("Open Pull Request (\(openPR?.display ?? "none"))")
       .disabled(snapshot.selectedPullRequestURL == nil || !snapshot.githubIntegrationEnabled)
       Divider()
-      Button("Refresh Worktrees", systemImage: "arrow.clockwise") {
+      Button(vocab.refreshWorktrees, systemImage: "arrow.clockwise") {
         store.send(.repositories(.refreshWorktrees))
       }
       .appKeyboardShortcut(refresh)
       .help("Refresh (\(refresh?.display ?? "none"))")
       .disabled(!snapshot.isInitialLoadComplete)
-      Button("Archived Worktrees", systemImage: "archivebox") {
+      Button(vocab.archivedWorktrees, systemImage: "archivebox") {
         store.send(.repositories(.selectArchivedWorktrees))
       }
       .appKeyboardShortcut(archived)
-      .help("Archived Worktrees (\(archived?.display ?? "none"))")
+      .help("\(vocab.archivedWorktrees) (\(archived?.display ?? "none"))")
       .disabled(!snapshot.isInitialLoadComplete)
       Divider()
-      Button("Archive Worktree…", systemImage: "archivebox") {
+      Button(vocab.archive(plural: false), systemImage: "archivebox") {
         archiveWorktreeAction?()
       }
       .appKeyboardShortcut(archive)
-      .help("Archive Worktree (\(archive?.display ?? "none"))")
+      .help("Archive \(vocab.workspaceNoun) (\(archive?.display ?? "none"))")
       .disabled(archiveWorktreeAction?.isEnabled != true)
-      Button("Delete Worktree…", systemImage: "trash") {
+      Button(vocab.delete(plural: false), systemImage: "trash") {
         deleteWorktreeAction?()
       }
       .appKeyboardShortcut(deleteWt)
-      .help("Delete Worktree (\(deleteWt?.display ?? "none"))")
+      .help("Delete \(vocab.workspaceNoun) (\(deleteWt?.display ?? "none"))")
       .disabled(deleteWorktreeAction?.isEnabled != true)
       Divider()
       Button("Run Script", systemImage: ScriptKind.run.defaultSystemImage) {
