@@ -513,11 +513,11 @@ private struct CommandPaletteRowView: View {
     case .openSettings:
       base = "Open Settings"
     case .newWorktree:
-      base = "New Worktree"
+      base = WorktreeVocabulary(isJJ: row.isJJ).newWorktree
     case .viewArchivedWorktrees:
-      base = "View Archived Worktrees"
+      base = WorktreeVocabulary(isJJ: row.isJJ).viewArchivedWorktrees
     case .refreshWorktrees:
-      base = "Refresh Worktrees"
+      base = WorktreeVocabulary(isJJ: row.isJJ).refreshWorktrees
     case .ghosttyCommand:
       base = row.title
     case .removeWorktree:
@@ -525,7 +525,10 @@ private struct CommandPaletteRowView: View {
     case .archiveWorktree:
       base = "Archive \(row.title)"
     case .renameBranch:
-      base = "Rename the local branch for this worktree"
+      base =
+        row.isJJ
+        ? "Rename the bookmark for this workspace"
+        : "Rename the local branch for this worktree"
     case .openPullRequest:
       base = "Open pull request on GitHub"
     case .markPullRequestReady:

@@ -172,6 +172,13 @@ struct CommandPaletteFeature {
     scripts: [ScriptDefinition] = [],
     runningScriptIDs: Set<UUID> = []
   ) -> [CommandPaletteItem] {
+    // The global worktree actions follow the SELECTED repo's backend, so they
+    // read "New Workspace" etc. when a jj row is selected (git otherwise).
+    let selectedIsJJ =
+      repositories.selectedWorktreeID
+      .flatMap { repositories.repositoryID(containing: $0) }
+      .map { repositories.usesJujutsuBackend(forRepository: $0) } ?? false
+    let globalVocab = WorktreeVocabulary(isJJ: selectedIsJJ)
     var items: [CommandPaletteItem] = [
       CommandPaletteItem(
         id: CommandPaletteItemID.globalCheckForUpdates,
@@ -193,21 +200,24 @@ struct CommandPaletteFeature {
       ),
       CommandPaletteItem(
         id: CommandPaletteItemID.globalNewWorktree,
-        title: "New Worktree",
+        title: globalVocab.newWorktree,
         subtitle: nil,
-        kind: .newWorktree
+        kind: .newWorktree,
+        isJJ: selectedIsJJ
       ),
       CommandPaletteItem(
         id: CommandPaletteItemID.globalRefreshWorktrees,
-        title: "Refresh Worktrees",
+        title: globalVocab.refreshWorktrees,
         subtitle: nil,
-        kind: .refreshWorktrees
+        kind: .refreshWorktrees,
+        isJJ: selectedIsJJ
       ),
       CommandPaletteItem(
         id: CommandPaletteItemID.globalViewArchivedWorktrees,
-        title: "View Archived Worktrees",
+        title: globalVocab.viewArchivedWorktrees,
         subtitle: nil,
-        kind: .viewArchivedWorktrees
+        kind: .viewArchivedWorktrees,
+        isJJ: selectedIsJJ
       ),
     ]
     if repositories.selectedWorktreeID != nil {
@@ -278,11 +288,13 @@ struct CommandPaletteFeature {
     let worktreeDisplayName =
       SidebarDisplayName.resolved(custom: selectedRow.customTitle, fallback: selectedRow.name)
       ?? selectedRow.name
+    let isJJ = repositories.usesJujutsuBackend(forRepository: selectedRepositoryID)
     return CommandPaletteItem(
       id: CommandPaletteItemID.renameBranch(selectedWorktreeID),
-      title: "Rename Branch",
+      title: WorktreeVocabulary(isJJ: isJJ).renameTitle,
       subtitle: "\(repositoryName) · \(worktreeDisplayName)",
-      kind: .renameBranch(selectedWorktreeID, selectedRepositoryID)
+      kind: .renameBranch(selectedWorktreeID, selectedRepositoryID),
+      isJJ: isJJ
     )
   }
 
