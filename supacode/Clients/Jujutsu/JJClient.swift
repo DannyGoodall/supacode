@@ -89,17 +89,22 @@ struct JJClient {
   /// counterpart to `GitClient.branchName`). nil when there is no bookmark or
   /// jj fails.
   nonisolated func branchName(forWorkspaceAt workspaceURL: URL) async -> String? {
+    let url = workspaceURL.standardizedFileURL
     let output = try? await runJJ(
       ["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", Self.bookmarkTemplate],
-      cwd: workspaceURL.standardizedFileURL
+      cwd: url
     )
     let bookmark = Self.firstBookmark(from: output)
-    // NOTE: a single cheap read. Do NOT fall back to a full `jj workspace
-    // list` + per-workspace `root --name` enumeration here — this runs on
-    // every watcher tick, and for an anonymous `@` that spawned several
-    // login-shell subprocesses per event and saturated the main actor.
-    // Clearing a stale label on an anonymous `@` is handled separately/cheaply.
-    return bookmark.isEmpty ? nil : bookmark
+    if !bookmark.isEmpty { return bookmark }
+    // Anonymous `@` (no bookmark) — fall back to the workspace name so the
+    // watcher CLEARS a stale bookmark label after `jj new` moves `@` off a
+    // bookmark (matching the listing's "bookmark else workspace name" rule).
+    // This enumerates (`jj workspace list` + per-workspace `root --name`),
+    // which is why it must NOT run on a hot path — it's safe now ONLY because
+    // the sole caller is the op-log watcher (`gitClient.branchName`, fired on
+    // real jj operations, not continuously). Do not call branchName from a
+    // per-render / per-tick path.
+    return try? await workspaceName(forPath: url, repoRoot: url)
   }
 
   /// Line changes for the workspace at `workspaceURL` via `jj diff --stat -r @`.
