@@ -744,7 +744,8 @@ private struct SidebarItemContextMenu: View {
       let allFolders = pinnableRows.allSatisfy(\.isFolder)
       // Folder-only selection reads "Pin Folder" / "Pin Folders"; otherwise the
       // flavor-aware noun ("Worktree" for git, "Workspace" for jj).
-      let noun = allFolders
+      let noun =
+        allFolders
         ? "Folder"
         : store.state.worktreeVocabulary(forRepository: repositoryID).workspaceNoun
       if allPinned {
