@@ -71,3 +71,12 @@ The backend routes to jj, but the UI kept hardcoded git vocabulary. Make the wor
 - [x] 9.3 Relabelled for jj rows: sidebar context menu (slice A), New button (A), toolbar/Worktrees menu (B), create + rename prompts (C), missing-worktree detail (D). ⏳ Command palette deferred — its view holds only `CommandPaletteFeature` state, so a row must carry an `isJJ` flag built in the reducer (follow-up). Archived empty-state header left generic (no repo → no flavor).
 - [x] 9.4 Effectively satisfied for co-located repos: the prompt's base-ref menu lists git refs which, in a co-located repo, ARE the bookmarks (jj exports bookmarks to git refs), the field is relabelled "Base revision", and `JJClient.createWorkspace` translates the selected ref → revset on submit. ⏳ Optional refinement: route `branchInventory` to native `jj bookmark` enumeration (incl. `@`/`trunk()` revsets).
 - [x] 9.5 Tests: `WorktreeVocabularyTests` (git-verbatim + jj strings). Flavor-gated selection is build-verified and exercised through the resolver matrix (`RepositoryJJColocationTests`).
+
+## 10. Polish / follow-ups (post-GUI-testing)
+
+Live updates restored via the `.jj/op_heads` watcher (Phase 7 note). Remaining:
+
+- [ ] 10.1 Command palette relabel — thread an `isJJ` flag onto palette rows (built in `CommandPaletteFeature`, which has `repositories` access) so labels read "New Workspace" / "Rename Bookmark" etc.; the overlay view only holds `CommandPaletteFeature` state.
+- [ ] 10.2 Display the jj **change id** on the sidebar row label, with the shortest-unique-prefix highlighted (jj-idiomatic, e.g. bold prefix + dim rest). Source via a `jj log -r @` template (`change_id.shortest()` → prefix/rest); thread to the row; render with two Text runs / AttributedString.
+- [ ] 10.3 Add a **bird icon** next to the branch icon for jj repo rows (SF Symbol `bird`), gated on `isColocatedJJ`, to visually distinguish jj workspaces/bookmarks from git worktrees/branches.
+- [ ] 10.4 Watcher latency: the anonymous-`@` branch-name fallback runs several login-shell `jj` subprocesses (~5s worst case). Optimize — cache the workspace name at enumeration time (avoid re-enumerating), and/or use a non-login shell for watcher reads, and/or tune the jj debounce.
