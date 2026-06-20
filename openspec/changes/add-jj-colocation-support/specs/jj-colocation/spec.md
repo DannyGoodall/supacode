@@ -98,15 +98,15 @@ For co-located repositories, branch operations SHALL map to Jujutsu bookmarks: r
 - **THEN** the UI shows no branch name rather than an error
 
 ### Requirement: Remote and pull-request operations
-For co-located repositories, fetching SHALL use `jj git fetch`, and the product SHALL provide a bookmark push action (`jj git push --bookmark <name>`) as a pull-request preparation step, exposed on the toolbar and the CLI/deeplink surface. GitHub pull-request tracking, merge, close, and checks SHALL continue to operate via the `gh` CLI unchanged, matching pull requests to workspaces by the pushed bookmark name.
+For co-located repositories, fetching SHALL use `jj git fetch`, and the product SHALL provide a bookmark push action (`jj git push --bookmark <name> --allow-new`) as a pull-request preparation step, exposed on the CLI/deeplink surface (`supacode worktree push`, `supacode://worktree/<id>/push`). GitHub pull-request tracking, merge, close, and checks SHALL continue to operate via the `gh` CLI unchanged, matching pull requests to workspaces by the pushed bookmark name.
 
 #### Scenario: Fetch on a co-located repository
 - **WHEN** a fetch is requested for a co-located repository
 - **THEN** `jj git fetch` is used and remote state is updated
 
 #### Scenario: Push a bookmark for PR prep
-- **WHEN** the user invokes the push action on a co-located workspace
-- **THEN** the workspace's bookmark is pushed with `jj git push --bookmark <name>` so a pull request can be opened against it
+- **WHEN** the user invokes the push action on a co-located workspace via the CLI (`supacode worktree push`) or the `supacode://worktree/<id>/push` deeplink
+- **THEN** the workspace's bookmark is pushed with `jj git push --bookmark <name> --allow-new` so a pull request can be opened against it, and any failure surfaces as an alert (the CLI response reports the error)
 
 #### Scenario: PR tracking still works
 - **WHEN** a workspace's bookmark has been pushed and a pull request exists for it
@@ -143,11 +143,15 @@ For co-located repositories, line-change counts SHALL be computed with `jj diff 
 - **THEN** the sidebar refreshes the workspace's branch label and change indicators
 
 ### Requirement: External automation mirrors jj operations
-The `supacode-cli` and `supacode://` deeplink surfaces SHALL route VCS-agnostic verbs (new, delete, pin, unpin, archive, focus) to the appropriate backend for the target repository, so that creating or removing a working copy on a co-located repository performs the Jujutsu equivalent. The user-facing vocabulary SHALL remain unchanged.
+The `supacode-cli` and `supacode://` deeplink surfaces SHALL route their verbs (new, delete, pin, unpin, archive, focus, push) to the appropriate behavior for the target repository, so that creating or removing a working copy on a co-located repository performs the Jujutsu equivalent. The CLI/deeplink **verb vocabulary** SHALL remain stable and backend-neutral (e.g. `worktree new`/`worktree delete`/`worktree push`, not renamed per backend) so existing scripts keep working; this is distinct from the GUI, which presents jj-native vocabulary per the "jj-native UI presentation" requirement.
 
 #### Scenario: CLI new on a co-located repository
 - **WHEN** the user runs the worktree/repo "new" command against a co-located repository
 - **THEN** a Jujutsu workspace is created via the same command and flags used for Git worktrees
+
+#### Scenario: CLI verbs stay backend-neutral
+- **WHEN** a script invokes `supacode worktree new` / `delete` / `push` against a co-located repository
+- **THEN** the verbs are unchanged (not renamed to "workspace"/"bookmark") and perform the Jujutsu equivalent
 
 ### Requirement: Graceful degradation without the jj CLI
 When the `jj` CLI is not available on PATH, a co-located repository SHALL fall back to Git behavior rather than failing, even when the experimental gate is on.
@@ -155,3 +159,22 @@ When the `jj` CLI is not available on PATH, a co-located repository SHALL fall b
 #### Scenario: jj CLI missing
 - **WHEN** the experimental gate is on, a root is co-located, but `jj` is not installed
 - **THEN** the repository operates via the Git backend and the user is not blocked
+
+### Requirement: jj-native UI presentation
+For a row whose repository is co-located Jujutsu and using the jj backend, the GUI SHALL present jj-native vocabulary in place of Git terms — "workspace" for worktree and "bookmark" for branch — across the sidebar context menu, the "new" affordance, the toolbar/Worktrees menu, the command palette, the worktree detail view, the archived-items view, the new-workspace prompt, and the rename prompt. Plain-Git and folder rows SHALL be visually unchanged. No worktree action SHALL be hidden solely because the repository is Jujutsu — every action routes to a jj-safe operation (archive is a sidebar-state move with no filesystem effect; delete maps to `jj workspace forget` + directory removal; rename maps to `jj bookmark rename`). The new-workspace prompt SHALL offer jj bookmarks/revsets in place of Git base refs for a co-located repository.
+
+#### Scenario: jj row shows workspace/bookmark vocabulary
+- **WHEN** a co-located workspace row's menus and prompts are shown
+- **THEN** they read in jj terms (e.g. "New Workspace…", "Rename Bookmark…", "Delete Workspace…", "Archive Workspace…", "Copy as Bookmark Name", "Base bookmark/revision")
+
+#### Scenario: Git and folder rows are unchanged
+- **WHEN** a plain-Git worktree row or a folder row's menus are shown
+- **THEN** they read in the existing Git/folder vocabulary, unchanged
+
+#### Scenario: No action hidden for a jj row
+- **WHEN** a co-located workspace row's context menu is shown
+- **THEN** archive, delete, rename, pin/unpin, and Open Pull Request are all available, each routing to a jj-safe operation
+
+#### Scenario: New-workspace prompt offers jj base revisions
+- **WHEN** the new-workspace prompt is shown for a co-located repository
+- **THEN** it offers jj bookmarks/revsets as the base revision rather than Git refs

@@ -64,12 +64,10 @@
 
 ## 9. jj-native presentation layer (added after GUI testing — Decision 11)
 
-The backend routes to jj, but the UI kept hardcoded git vocabulary and offered git-only actions on jj rows. Make the worktree UI flavor-aware for co-located jj repos.
+The backend routes to jj, but the UI kept hardcoded git vocabulary. Make the worktree UI flavor-aware for co-located jj repos. **Audit finding:** no action needs hiding for safety — archive is a sidebar-state move (no fs/git op), delete → `jj workspace forget` + dir removal, rename → `jj bookmark rename`. So this phase is relabeling + the prompt's revset source.
 
-- [ ] 9.0 SAFETY: hide Archive/Unarchive for jj rows (context menu + toolbar). Archiving a jj workspace routes through the jj `removeWorktree` (= `jj workspace forget` + dir delete) — destructive, not an archive. Highest priority.
-- [ ] 9.1 Thread the row's flavor (`isColocatedJJ` / a vocabulary value) to the worktree views (sidebar context menu, `SidebarListView` new-button, toolbar menu, creation prompt, rename UI, `WorktreeDetailView`) via the established seam (look up the repo by the row's `repositoryRootURL`/id, or thread a field like the settings summary did).
-- [ ] 9.2 Single vocabulary helper keyed off flavor (Workspace/Bookmark nouns + the action labels) so there's one source of truth, no scattered conditionals.
-- [ ] 9.3 Relabel for jj rows: "Rename Bookmark…", "Copy as Bookmark Name", "Pin/Unpin Workspace", "Forget Workspace…", "New Workspace…", prompt title/fields, rename UI copy. Git/folder rows unchanged.
-- [ ] 9.4 New-workspace prompt offers jj revsets/bookmarks (not git refs) for jj repos; base ref → revset.
-- [ ] 9.5 Audit every remaining worktree action for jj-correctness; hide/adapt any other git-only affordance surfaced by the audit.
-- [ ] 9.6 Tests: vocabulary helper; flavor-gated label + action selection; Archive hidden for jj; git/folder rows unchanged.
+- [ ] 9.1 Single vocabulary helper keyed off the flavor (Workspace/Bookmark nouns + the action labels) so there's one source of truth, no scattered conditionals.
+- [ ] 9.2 Reach the row's flavor in each view. Most views have the parent store and can look up `store.state.repositories[id: repositoryID]?.isColocatedJJ` (sidebar context menu, New button, command palette, archived header, toolbar/Worktrees menu via the focused worktree). Thread an `isColocatedJJ` field into `WorktreeCreationPromptFeature.State` and `RenameBranchFeature.State` (set when created) and into `WorktreeDetailView` (parameter), since those don't have it.
+- [ ] 9.3 Relabel for jj rows across all surfaces: sidebar context menu ("Rename Bookmark…", "Copy as Bookmark Name", "Pin/Unpin Workspace", "Archive Workspace…", "Delete Workspace…"), `SidebarListView` New button ("New Workspace"), toolbar/Worktrees menu (New/Archive/Archived/Delete Workspace), command palette, `WorktreeDetailView` delete, `ArchivedWorktreesDetailView` header, creation-prompt title/fields ("New Workspace", "Bookmark name", "Base revision"), rename-prompt copy. Plain-git/folder rows unchanged.
+- [ ] 9.4 New-workspace prompt offers jj revsets/bookmarks (not git refs) for jj repos: load bookmarks via the backend and label the field "Base bookmark/revision"; base ref → revset on submit.
+- [ ] 9.5 Tests: vocabulary helper; flavor-gated label selection (jj row shows workspace/bookmark terms, git/folder rows unchanged); prompt/rename feature carry + honor the flavor.
