@@ -1961,18 +1961,24 @@ struct RepositoriesFeature {
           state.repositories[id: target.repositoryID]?.worktrees[id: target.worktreeID]?.isMissing
             == true
         }
-        let title = count == 1 ? "Delete worktree?" : "Delete \(count) worktrees?"
-        let buttonLabel = count == 1 ? "Delete worktree" : "Delete \(count) worktrees"
+        // Flavor-aware copy: jj when every target is a jj-backed repo.
+        let deleteVocab: WorktreeVocabulary =
+          validTargets.allSatisfy { state.usesJujutsuBackend(forRepository: $0.repositoryID) }
+          ? .jujutsu : .git
+        let wsNoun = deleteVocab.workspaceNoun.lowercased()
+        let bmNoun = deleteVocab.bookmarkNoun.lowercased()
+        let title = count == 1 ? "Delete \(wsNoun)?" : "Delete \(count) \(wsNoun)s?"
+        let buttonLabel = count == 1 ? "Delete \(wsNoun)" : "Delete \(count) \(wsNoun)s"
         let message: String =
           switch (count, deleteBranchOnDeleteWorktree, allMissing) {
-          case (1, _, true): "Removes the orphan worktree entry from this repository."
-          case (_, _, true): "Removes \(count) orphan worktree entries from this repository."
-          case (1, true, false): "This deletes the worktree directory and its local branch."
-          case (1, false, false): "This deletes the worktree directory but keeps the local branch."
+          case (1, _, true): "Removes the orphan \(wsNoun) entry from this repository."
+          case (_, _, true): "Removes \(count) orphan \(wsNoun) entries from this repository."
+          case (1, true, false): "This deletes the \(wsNoun) directory and its local \(bmNoun)."
+          case (1, false, false): "This deletes the \(wsNoun) directory but keeps the local \(bmNoun)."
           case (_, true, false):
-            "This deletes \(count) worktree directories and their local branches."
+            "This deletes \(count) \(wsNoun) directories and their local \(bmNoun)s."
           case (_, false, false):
-            "This deletes \(count) worktree directories but keeps their local branches."
+            "This deletes \(count) \(wsNoun) directories but keeps their local \(bmNoun)s."
           }
         state.alert = AlertState {
           TextState(title)
