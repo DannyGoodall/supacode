@@ -663,7 +663,11 @@ private struct SidebarItemContextMenu: View {
         Button(vocab.renameBranch, systemImage: "pencil") {
           store.send(.requestRenameBranch(worktree.id, repositoryID))
         }
-        .help("Rename the local \(vocab.bookmarkNoun.lowercased()) for this \(vocab.workspaceNoun.lowercased())")
+        .help(
+          vocab.isJJ
+            ? "Rename the bookmark for this workspace"
+            : "Rename the local branch for this worktree"
+        )
       }
       Divider()
       if rowIsFolder {

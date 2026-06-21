@@ -18,7 +18,6 @@ struct WorktreeVocabulary: Equatable, Sendable {
   // MARK: Context-menu / row actions
   var renameBranch: String { "Rename \(bookmarkNoun)…" }
   var copyAsBranchName: String { "Copy as \(bookmarkNoun) Name" }
-  func pin(isPinned: Bool) -> String { (isPinned ? "Unpin " : "Pin ") + workspaceNoun }
   func archive(plural: Bool) -> String { "Archive \(workspaceNoun)\(plural ? "s" : "")…" }
   func delete(plural: Bool) -> String { "Delete \(workspaceNoun)\(plural ? "s" : "")…" }
 
@@ -30,7 +29,6 @@ struct WorktreeVocabulary: Equatable, Sendable {
   var refreshWorktrees: String { "Refresh \(workspaceNoun)s" }
 
   // MARK: Prompts
-  var newWorktreeTitle: String { "New \(workspaceNoun)" }
   var branchNameField: String { "\(bookmarkNoun) name" }
   var baseRefLabel: String { isJJ ? "Base revision" : "Base ref" }
   var renameTitle: String { "Rename \(bookmarkNoun)" }

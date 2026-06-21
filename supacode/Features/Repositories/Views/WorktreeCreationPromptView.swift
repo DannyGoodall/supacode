@@ -18,7 +18,7 @@ struct WorktreeCreationPromptView: View {
       } header: {
         // `NavigationStack` with title and subtitle is bugged inside
         // sheets in macOS 26.*, and this is a nice enough fallback.
-        Text(store.vocab.newWorktreeTitle)
+        Text(store.vocab.newWorktree)
         Text("Create a \(store.vocab.bookmarkNoun.lowercased()) in `\(store.repositoryName)`.")
       } footer: {
         WorktreeCreationFooter(store: store)
