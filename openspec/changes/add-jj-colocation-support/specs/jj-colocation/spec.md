@@ -98,7 +98,7 @@ For co-located repositories, branch operations SHALL map to Jujutsu bookmarks: r
 - **THEN** the UI shows no branch name rather than an error
 
 ### Requirement: Remote and pull-request operations
-For co-located repositories, fetching SHALL use `jj git fetch`, and the product SHALL provide a bookmark push action (`jj git push --bookmark <name> --allow-new`) as a pull-request preparation step, exposed on the CLI/deeplink surface (`supacode worktree push`, `supacode://worktree/<id>/push`). GitHub pull-request tracking, merge, close, and checks SHALL continue to operate via the `gh` CLI unchanged, matching pull requests to workspaces by the pushed bookmark name.
+For co-located repositories, fetching SHALL use `jj git fetch`, and the product SHALL provide a bookmark push action (`jj git push --bookmark <name>`) as a pull-request preparation step, exposed on the CLI/deeplink surface (`supacode worktree push`, `supacode://worktree/<id>/push`). GitHub pull-request tracking, merge, close, and checks SHALL continue to operate via the `gh` CLI unchanged, matching pull requests to workspaces by the pushed bookmark name.
 
 #### Scenario: Fetch on a co-located repository
 - **WHEN** a fetch is requested for a co-located repository
@@ -106,7 +106,7 @@ For co-located repositories, fetching SHALL use `jj git fetch`, and the product 
 
 #### Scenario: Push a bookmark for PR prep
 - **WHEN** the user invokes the push action on a co-located workspace via the CLI (`supacode worktree push`) or the `supacode://worktree/<id>/push` deeplink
-- **THEN** the workspace's bookmark is pushed with `jj git push --bookmark <name> --allow-new` so a pull request can be opened against it, and any failure surfaces as an alert (the CLI response reports the error)
+- **THEN** the workspace's bookmark is pushed with `jj git push --bookmark <name>` so a pull request can be opened against it, and any failure surfaces as an alert (the CLI response reports the error)
 
 #### Scenario: PR tracking still works
 - **WHEN** a workspace's bookmark has been pushed and a pull request exists for it

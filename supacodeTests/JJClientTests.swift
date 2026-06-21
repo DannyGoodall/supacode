@@ -53,7 +53,12 @@ struct JJClientTests {
           } else {
             bookmark = bookmarks[String(revset.dropLast())] ?? ""  // strip trailing "@"
           }
-          return ShellOutput(stdout: bookmark + "\n", stderr: "", exitCode: 0)
+          // `headTemplate` (change-id + bookmarks) carries the bookmark in the
+          // 3rd tab field; the bookmark-only template is a single field. Mirror
+          // both layouts so `parseHead` / `firstBookmark` read the right slot.
+          let isHeadTemplate = value(after: "-T")?.contains("shortest") == true
+          let stdout = isHeadTemplate ? "\t\t\(bookmark)\n" : "\(bookmark)\n"
+          return ShellOutput(stdout: stdout, stderr: "", exitCode: 0)
         }
         if arguments.count >= 2, arguments[1] == "diff" {
           return ShellOutput(stdout: diffStat + "\n", stderr: "", exitCode: 0)
@@ -102,6 +107,20 @@ struct JJClientTests {
     let result = try await JJClient(shell: shell).workspaces(for: root)
 
     #expect(result.map(\.name) == ["default"])
+  }
+
+  @Test func defaultWorkspaceFallsBackToRepoRootWhenPathUnrecorded() async throws {
+    // Older `.jj` repos answer `jj workspace root --name default` with
+    // "no recorded path" (empty here) — the default workspace must still resolve
+    // to the repo root, not vanish (which would leave the repo unselectable).
+    let root = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let shell = makeShell(names: ["default"], paths: [:])  // no recorded path for default
+
+    let result = try await JJClient(shell: shell).workspaces(for: root)
+
+    #expect(result.count == 1)
+    #expect(result.first?.workingDirectory.standardizedFileURL == root.standardizedFileURL)
   }
 
   @Test func usesBookmarkAsNameWhenPresentElseWorkspaceName() async throws {
@@ -173,6 +192,45 @@ struct JJClientTests {
     #expect(result.contains { $0.name == "elsewhere" })
   }
 
+  /// Regression: `ShellClient` trims leading/trailing whitespace off stdout, so
+  /// an anonymous `@`'s headTemplate line (empty bookmark field) arrives without
+  /// its leading tab. The template must lead with the always-present change id;
+  /// otherwise the prefix shifts into the bookmark slot and the row renders its
+  /// change-id prefix as a bookmark name (the staleness/corruption bug).
+  @Test func anonymousChangeIdParsesWithoutFieldShift() async throws {
+    let root = try makeTempDir()
+    let workspaceDir = try makeTempDir()
+    defer {
+      try? FileManager.default.removeItem(at: root)
+      try? FileManager.default.removeItem(at: workspaceDir)
+    }
+    let shell = ShellClient(
+      run: { _, _, _ in ShellOutput(stdout: "", stderr: "", exitCode: 0) },
+      runLoginImpl: { _, arguments, _, _ in
+        if arguments.count >= 3, arguments[1] == "workspace", arguments[2] == "list" {
+          return ShellOutput(stdout: "anon\n", stderr: "", exitCode: 0)
+        }
+        if arguments.count >= 5, arguments[1] == "workspace", arguments[2] == "root" {
+          return ShellOutput(stdout: workspaceDir.path(percentEncoded: false) + "\n", stderr: "", exitCode: 0)
+        }
+        if arguments.count >= 2, arguments[1] == "log" {
+          // Exactly what the live shell delivers after trimming the leading tab
+          // of an empty-bookmark line: "<prefix>\t<rest>" (bookmark field gone).
+          return ShellOutput(stdout: "ow\turvzvm", stderr: "", exitCode: 0)
+        }
+        return ShellOutput(stdout: "", stderr: "", exitCode: 0)
+      }
+    )
+
+    let result = try await JJClient(shell: shell).workspaces(for: root)
+
+    #expect(result.count == 1)
+    // Name is the workspace name, NOT the change-id prefix "ow".
+    #expect(result.first?.name == "anon")
+    #expect(result.first?.isAttached == false)
+    #expect(result.first?.jjChangeId == ChangeIdDisplay(prefix: "ow", rest: "urvzvm"))
+  }
+
   // MARK: - Create / remove
 
   /// Recording shell: captures every jj argv and answers list/root/remote.
@@ -223,15 +281,16 @@ struct JJClientTests {
     #expect(recorder.commands().contains(["bookmark", "rename", "old", "new"]))
   }
 
-  @Test func pushBookmarkIssuesAllowNewPush() async throws {
+  @Test func pushBookmarkIssuesGitPush() async throws {
     let recorder = JJCommandRecorder()
     let shell = makeRecordingShell(recorder: recorder)
     let client = JJClient(shell: shell)
     try await client.pushBookmark(named: "feat", remote: nil, repoRoot: URL(fileURLWithPath: "/tmp/repo"))
     try await client.pushBookmark(named: "feat", remote: "origin", repoRoot: URL(fileURLWithPath: "/tmp/repo"))
     let cmds = recorder.commands()
-    #expect(cmds.contains(["git", "push", "--bookmark", "feat", "--allow-new"]))
-    #expect(cmds.contains(["git", "push", "--bookmark", "feat", "--allow-new", "--remote", "origin"]))
+    // No --allow-new: jj 0.42 rejects it and creates new remote bookmarks by default.
+    #expect(cmds.contains(["git", "push", "--bookmark", "feat"]))
+    #expect(cmds.contains(["git", "push", "--bookmark", "feat", "--remote", "origin"]))
   }
 
   @Test func fetchIssuesJJGitFetch() async throws {
