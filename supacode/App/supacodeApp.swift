@@ -121,6 +121,15 @@ struct SupacodeApp: App {
   @State private var store: StoreOf<AppFeature>
 
   @MainActor init() {
+    // Debug builds isolate the zmx socket dir so a local dev build never shares
+    // a multiplexer daemon namespace with the installed release app. A shared
+    // `$TMPDIR/zmx-<uid>` lets one instance's `zmx attach` disrupt the other's
+    // live sessions (observed: launching a Debug terminal killed the release
+    // app's session). Set before any zmx use; `setenv` overwrite=0 respects an
+    // explicit `ZMX_DIR`. Kept short to stay under the `sun_path` budget.
+    if SupacodePaths.isDebugBuild {
+      setenv("ZMX_DIR", ZmxSocketBudget.socketDir(), 0)
+    }
     NSWindow.allowsAutomaticWindowTabbing = false
     UserDefaults.standard.set(200, forKey: "NSInitialToolTipDelay")
     // Fold the six legacy sidebar-state sources into `sidebar.json`

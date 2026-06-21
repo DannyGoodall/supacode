@@ -287,11 +287,24 @@ nonisolated enum ZmxSocketBudget {
   /// the env variable lacks a trailing `/`. The `env` parameter is injectable
   /// so tests can drive inputs deterministically without depending on process
   /// state.
-  static func socketDir(env: [String: String] = ProcessInfo.processInfo.environment) -> String {
+  static func socketDir(
+    env: [String: String] = ProcessInfo.processInfo.environment,
+    bundleIdentifier: String? = Bundle.main.bundleIdentifier
+  ) -> String {
+    // Explicit override always wins (corporate managed Macs, tests).
     if let custom = env["ZMX_DIR"], !custom.isEmpty {
       return custom
     }
     let uid = getuid()
+    // Debug builds get an isolated socket dir so a local dev build's zmx daemon
+    // and sessions never collide with the installed release app's — both
+    // otherwise resolve the same `$TMPDIR/zmx-<uid>`, which let a dev build (or
+    // diagnostics run against it) disrupt the release app's live sessions.
+    // Kept short to stay under the sun_path budget. Sits ahead of XDG/TMPDIR so
+    // isolation holds even when those are set; an explicit `ZMX_DIR` still wins.
+    if bundleIdentifier?.hasSuffix(".debug") == true {
+      return "/tmp/zmx-\(uid)-dbg"
+    }
     if let xdg = env["XDG_RUNTIME_DIR"], !xdg.isEmpty {
       return "\(trimTrailingSlash(xdg))/zmx"
     }

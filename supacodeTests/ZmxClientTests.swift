@@ -113,9 +113,10 @@ struct ZmxSocketBudgetTests {
   }
 
   @Test func socketDirFallsBackThroughXdgAndTmp() {
-    let xdg = ZmxSocketBudget.socketDir(env: ["XDG_RUNTIME_DIR": "/xdg"])
+    let release = "app.supabit.supacode"
+    let xdg = ZmxSocketBudget.socketDir(env: ["XDG_RUNTIME_DIR": "/xdg"], bundleIdentifier: release)
     #expect(xdg == "/xdg/zmx")
-    let tmp = ZmxSocketBudget.socketDir(env: ["TMPDIR": "/tmp/foo/"])
+    let tmp = ZmxSocketBudget.socketDir(env: ["TMPDIR": "/tmp/foo/"], bundleIdentifier: release)
     let uid = getuid()
     #expect(tmp == "/tmp/foo/zmx-\(uid)")
   }
@@ -126,16 +127,47 @@ struct ZmxSocketBudgetTests {
     // Without the trim, kill and the wrapped shell would resolve different
     // socket dirs and sessions would leak silently.
     let uid = getuid()
-    #expect(ZmxSocketBudget.socketDir(env: ["TMPDIR": "/tmp"]) == "/tmp/zmx-\(uid)")
-    #expect(ZmxSocketBudget.socketDir(env: ["TMPDIR": "/var/folders/abc"]) == "/var/folders/abc/zmx-\(uid)")
+    let release = "app.supabit.supacode"
+    #expect(ZmxSocketBudget.socketDir(env: ["TMPDIR": "/tmp"], bundleIdentifier: release) == "/tmp/zmx-\(uid)")
+    #expect(
+      ZmxSocketBudget.socketDir(env: ["TMPDIR": "/var/folders/abc"], bundleIdentifier: release)
+        == "/var/folders/abc/zmx-\(uid)")
     // Multiple trailing slashes also collapse.
-    #expect(ZmxSocketBudget.socketDir(env: ["TMPDIR": "/tmp//"]) == "/tmp/zmx-\(uid)")
+    #expect(ZmxSocketBudget.socketDir(env: ["TMPDIR": "/tmp//"], bundleIdentifier: release) == "/tmp/zmx-\(uid)")
   }
 
   @Test func socketDirHandlesXdgWithoutTrailingSlash() {
     // Symmetric regression for the XDG branch.
-    #expect(ZmxSocketBudget.socketDir(env: ["XDG_RUNTIME_DIR": "/run/user/501/"]) == "/run/user/501/zmx")
-    #expect(ZmxSocketBudget.socketDir(env: ["XDG_RUNTIME_DIR": "/run/user/501"]) == "/run/user/501/zmx")
+    let release = "app.supabit.supacode"
+    #expect(
+      ZmxSocketBudget.socketDir(env: ["XDG_RUNTIME_DIR": "/run/user/501/"], bundleIdentifier: release)
+        == "/run/user/501/zmx")
+    #expect(
+      ZmxSocketBudget.socketDir(env: ["XDG_RUNTIME_DIR": "/run/user/501"], bundleIdentifier: release)
+        == "/run/user/501/zmx")
+  }
+
+  @Test func socketDirIsolatesDebugBuild() {
+    let uid = getuid()
+    // A `.debug` bundle id gets its own short socket dir even when TMPDIR/XDG
+    // are set, so a dev build never shares the release app's zmx daemon.
+    #expect(
+      ZmxSocketBudget.socketDir(
+        env: ["TMPDIR": "/var/folders/abc", "XDG_RUNTIME_DIR": "/run/user/501"],
+        bundleIdentifier: "app.supabit.supacode.debug"
+      ) == "/tmp/zmx-\(uid)-dbg")
+    // Release id keeps the shared TMPDIR default.
+    #expect(
+      ZmxSocketBudget.socketDir(env: ["TMPDIR": "/var/folders/abc"], bundleIdentifier: "app.supabit.supacode")
+        == "/var/folders/abc/zmx-\(uid)")
+    // Explicit ZMX_DIR still wins for a debug build.
+    #expect(
+      ZmxSocketBudget.socketDir(env: ["ZMX_DIR": "/custom"], bundleIdentifier: "app.supabit.supacode.debug")
+        == "/custom")
+    // The isolated debug dir stays under the sun_path budget.
+    let socketPathLen = "/tmp/zmx-\(uid)-dbg".utf8.count + 1 + ZmxSocketBudget.sessionNameByteCount
+    let budget = ZmxSocketBudget.sunPathLimit - ZmxSocketBudget.safetyMargin
+    #expect(socketPathLen <= budget)
   }
 
   @Test func probeFlagsBudgetExceededForOverLongCustomDir() {
