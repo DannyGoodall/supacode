@@ -23,6 +23,11 @@ enum WorktreeToolbarTitleContent: Hashable, Sendable {
     let worktreeTint: RepositoryColor?
     let accent: WorktreeAccent
     let rootURL: URL
+    /// jj change id of `@` (prefix + rest); `nil` for git rows. Rendered as a
+    /// chip beside the title so the chrome surfaces it even when the sidebar is
+    /// hidden, with the same treatment as the sidebar (prefix tinted/bright,
+    /// remainder dimmed).
+    let jjChangeId: ChangeIdDisplay?
   }
 }
 
@@ -89,11 +94,17 @@ private struct WorktreeToolbarTitleBody: View {
             .lineLimit(1)
             .truncationMode(.middle)
         case .git(let payload):
-          Text(payload.displayTitle)
-            .font(.callout.weight(.semibold))
-            .foregroundStyle(payload.worktreeTint?.color ?? .primary)
-            .lineLimit(1)
-            .truncationMode(.middle)
+          HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Text(payload.displayTitle)
+              .font(.callout.weight(.semibold))
+              .foregroundStyle(payload.worktreeTint?.color ?? .primary)
+              .lineLimit(1)
+              .truncationMode(.middle)
+            if let changeId = payload.jjChangeId {
+              let prefixStyle = payload.worktreeTint.map { AnyShapeStyle($0.color) } ?? AnyShapeStyle(.primary)
+              ChangeIdChip(changeId: changeId, prefixStyle: prefixStyle)
+            }
+          }
           let repoText = Text(payload.repositoryName)
             .foregroundStyle(payload.repositoryColor?.color ?? .secondary)
           let accentStyle = AnyShapeStyle(payload.accent.shapeStyle(emphasized: false))
@@ -180,7 +191,8 @@ enum GitHubOwnerAvatar {
             worktreeSubtitle: "319-toolbar-details",
             worktreeTint: nil,
             accent: .pinned,
-            rootURL: supacodeRepoRoot
+            rootURL: supacodeRepoRoot,
+            jjChangeId: ChangeIdDisplay(prefix: "qpv", rest: "wxyz")
           )
         )
       )
@@ -201,7 +213,8 @@ enum GitHubOwnerAvatar {
             worktreeSubtitle: "Default",
             worktreeTint: nil,
             accent: .main,
-            rootURL: URL(fileURLWithPath: "/tmp/preview")
+            rootURL: URL(fileURLWithPath: "/tmp/preview"),
+            jjChangeId: nil
           )
         )
       )

@@ -304,6 +304,11 @@ struct SelectedWorktreeSlice: Equatable, Sendable {
   let lifecycle: SidebarItemFeature.State.Lifecycle
   let pullRequest: GithubPullRequest?
   let runningScripts: IdentifiedArrayOf<SidebarItemFeature.State.RunningScript>
+  /// jj change id of `@` (prefix + rest); `nil` for git rows. Carried so the
+  /// toolbar title can mirror the sidebar's change-id chip, refreshed live by
+  /// the op-log watcher (`.worktreeChangeIdLoaded`). Updates only on real jj
+  /// operations, so it doesn't add a per-leaf storm to the detail body.
+  let jjChangeId: ChangeIdDisplay?
 
   init(_ row: SidebarItemFeature.State) {
     self.id = row.id
@@ -319,6 +324,7 @@ struct SelectedWorktreeSlice: Equatable, Sendable {
     self.lifecycle = row.lifecycle
     self.pullRequest = row.pullRequest
     self.runningScripts = row.runningScripts
+    self.jjChangeId = row.jjChangeId
   }
 
   var sidebarDisplayName: String? {

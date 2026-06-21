@@ -285,14 +285,14 @@ private struct TitleView: View, Equatable {
           }
         }
         .layoutPriority(1)
-        // jj change id: bold the shortest-unique prefix, dim the rest (jj-style).
+        // jj change id chip. A selected row reverts the prefix to the default
+        // foreground; otherwise it uses the row's custom tint (else bright).
         if let jjChangeId {
-          (Text(jjChangeId.prefix)
-            .fontWeight(.semibold)
-            .foregroundStyle(isEmphasized ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-            + Text(jjChangeId.rest).foregroundStyle(.secondary))
-            .font(.system(.caption, design: .monospaced))
-            .lineLimit(1)
+          let prefixStyle: AnyShapeStyle =
+            isEmphasized
+            ? AnyShapeStyle(.primary)
+            : (customTint.map { AnyShapeStyle($0.color) } ?? AnyShapeStyle(.primary))
+          ChangeIdChip(changeId: jjChangeId, prefixStyle: prefixStyle)
         }
       }
       switch subtitle {

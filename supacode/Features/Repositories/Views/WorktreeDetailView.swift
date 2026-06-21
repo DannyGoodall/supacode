@@ -599,7 +599,8 @@ struct WorktreeDetailView: View {
         worktreeSubtitle: worktreeSubtitle,
         worktreeTint: selectedRow?.customTint,
         accent: selectedRow?.accent ?? .default,
-        rootURL: selectedWorktree.repositoryRootURL
+        rootURL: selectedWorktree.repositoryRootURL,
+        jjChangeId: selectedRow?.jjChangeId
       )
     )
   }
@@ -1103,7 +1104,8 @@ private struct WorktreeToolbarPreview: View {
           worktreeSubtitle: "toolbar-preview",
           worktreeTint: nil,
           accent: .pinned,
-          rootURL: URL(fileURLWithPath: "/tmp/preview")
+          rootURL: URL(fileURLWithPath: "/tmp/preview"),
+          jjChangeId: ChangeIdDisplay(prefix: "qpv", rest: "wxyz")
         )
       ),
       rootURL: URL(fileURLWithPath: "/tmp/preview"),
