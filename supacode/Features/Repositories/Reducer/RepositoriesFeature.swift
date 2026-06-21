@@ -378,6 +378,10 @@ struct RepositoriesFeature {
     case repositoriesRemoved([Repository.ID], selectionWasRemoved: Bool)
     case pinWorktree(Worktree.ID)
     case unpinWorktree(Worktree.ID)
+    /// Push a worktree's branch/bookmark to its remote for PR prep
+    /// (routed to the jj backend for colocated repos). CLI/deeplink-driven;
+    /// failures surface via `presentAlert`.
+    case pushWorktreeBookmark(Worktree.ID)
     case presentAlert(title: String, message: String)
     case worktreeInfoEvent(WorktreeInfoWatcherClient.Event)
     case worktreeNotificationReceived(Worktree.ID)
@@ -2719,6 +2723,31 @@ struct RepositoriesFeature {
         RepositoriesFeature.syncSidebar(&state)
         return .none
 
+      case .pushWorktreeBookmark(let worktreeID):
+        guard let worktree = state.worktree(for: worktreeID),
+          worktree.isAttached, !worktree.name.isEmpty
+        else {
+          state.alert = messageAlert(
+            title: "Unable to push",
+            message: "This worktree has no branch or bookmark to push."
+          )
+          return .none
+        }
+        let branchName = worktree.name
+        let repositoryRootURL = worktree.repositoryRootURL
+        return .run { send in
+          do {
+            try await gitClient.pushBranch(branchName, repositoryRootURL)
+          } catch {
+            await send(
+              .presentAlert(
+                title: "Push failed",
+                message: "Couldn't push \(branchName).\n\n\(error.localizedDescription)"
+              )
+            )
+          }
+        }
+
       case .presentAlert(let title, let message):
         state.alert = messageAlert(title: title, message: message)
         return .none
@@ -4711,12 +4740,7 @@ extension RepositoriesFeature.State {
     if repository.worktrees[id: worktree.id] != nil { return }
     var worktrees = repository.worktrees
     worktrees.insert(worktree, at: 0)
-    repositories[index] = Repository(
-      id: repository.id,
-      rootURL: repository.rootURL,
-      name: repository.name,
-      worktrees: worktrees,
-    )
+    repositories[index] = repository.replacingWorktrees(worktrees)
   }
 
   @discardableResult
@@ -4726,12 +4750,7 @@ extension RepositoriesFeature.State {
     guard repository.worktrees[id: worktreeID] != nil else { return false }
     var worktrees = repository.worktrees
     worktrees.remove(id: worktreeID)
-    repositories[index] = Repository(
-      id: repository.id,
-      rootURL: repository.rootURL,
-      name: repository.name,
-      worktrees: worktrees,
-    )
+    repositories[index] = repository.replacingWorktrees(worktrees)
     return true
   }
 
@@ -4869,12 +4888,7 @@ extension RepositoriesFeature.State {
         isMissing: worktree.isMissing,
         isAttached: worktree.isAttached,
       )
-      repositories[index] = Repository(
-        id: repository.id,
-        rootURL: repository.rootURL,
-        name: repository.name,
-        worktrees: worktrees,
-      )
+      repositories[index] = repository.replacingWorktrees(worktrees)
       return
     }
   }

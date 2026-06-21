@@ -131,6 +131,189 @@ struct JJClient {
     return line.split(separator: ",").first.map(String.init) ?? line
   }
 
+  // MARK: - Create
+
+  /// Streaming create matching `GitClient.createWorktreeStream`'s event shape.
+  /// jj workspace creation is a couple of fast commands, so this wraps the
+  /// async `createWorkspace` and emits a single `.finished` (plus error
+  /// propagation) rather than streaming subprocess lines.
+  nonisolated func createWorkspaceStream(
+    named name: String,
+    in repoRoot: URL,
+    baseDirectory: URL,
+    baseRef: String,
+    directoryOverride: URL?
+  ) -> AsyncThrowingStream<GitWorktreeCreateEvent, Error> {
+    AsyncThrowingStream { continuation in
+      Task {
+        do {
+          let worktree = try await self.createWorkspace(
+            named: name,
+            in: repoRoot,
+            baseDirectory: baseDirectory,
+            baseRef: baseRef,
+            directoryOverride: directoryOverride
+          )
+          continuation.yield(.finished(worktree))
+          continuation.finish()
+        } catch {
+          continuation.finish(throwing: error)
+        }
+      }
+    }
+  }
+
+  /// Creates a jj workspace (`jj workspace add`) and auto-creates a bookmark at
+  /// its working-copy commit (Decision 7), so the workspace's "branch" is
+  /// non-anonymous and PR/push flows resolve a name. The base ref is resolved
+  /// to a jj revset (a git-style `remote/branch` is translated to `branch@remote`
+  /// only when the prefix is a known remote, so slashed bookmark names survive).
+  nonisolated func createWorkspace(
+    named name: String,
+    in repoRoot: URL,
+    baseDirectory: URL,
+    baseRef: String,
+    directoryOverride: URL?
+  ) async throws -> Worktree {
+    let repositoryRootURL = repoRoot.standardizedFileURL
+    // No `.isDirectory` hint: that appends a trailing slash, which would make
+    // the created workspace's path (and Worktree id) differ from the
+    // no-trailing-slash path the listing derives via `jj workspace root --name`
+    // for the same directory.
+    let targetURL = (directoryOverride ?? baseDirectory.appending(path: name)).standardizedFileURL
+    var addArguments = ["workspace", "add", targetURL.path(percentEncoded: false), "--name", name]
+    if let revset = await revset(forBaseRef: baseRef, repoRoot: repositoryRootURL) {
+      addArguments += ["-r", revset]
+    }
+    _ = try await runJJ(addArguments, cwd: repositoryRootURL)
+    // Auto-create the bookmark at the new workspace's working-copy commit.
+    // Best-effort: a name collision shouldn't fail the whole create.
+    _ = try? await runJJ(["bookmark", "create", name, "-r", "\(name)@"], cwd: repositoryRootURL)
+    let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: targetURL)
+    let createdAt = try? targetURL.resourceValues(forKeys: [.creationDateKey]).creationDate
+    return Worktree(
+      id: targetURL.path(percentEncoded: false),
+      name: name,
+      detail: detail,
+      workingDirectory: targetURL,
+      repositoryRootURL: repositoryRootURL,
+      createdAt: createdAt,
+      isMissing: false,
+      isAttached: true
+    )
+  }
+
+  // MARK: - Remove
+
+  /// Removes a jj workspace: resolve its workspace name from the path, `jj
+  /// workspace forget` it, delete its directory, and (when requested) delete
+  /// its bookmark. No git lock/prune machinery — that's git-worktree-specific.
+  /// Returns the removed working directory (matching `GitClient.removeWorktree`).
+  nonisolated func removeWorkspace(_ worktree: Worktree, deleteBookmark: Bool) async throws -> URL {
+    let repositoryRootURL = worktree.repositoryRootURL.standardizedFileURL
+    let targetURL = worktree.workingDirectory.standardizedFileURL
+    if let workspaceName = try await workspaceName(forPath: targetURL, repoRoot: repositoryRootURL) {
+      _ = try await runJJ(["workspace", "forget", workspaceName], cwd: repositoryRootURL)
+    }
+    if deleteBookmark, !worktree.name.isEmpty {
+      _ = try? await runJJ(["bookmark", "delete", worktree.name], cwd: repositoryRootURL)
+    }
+    // Remove off the calling task so a large tree doesn't block the reducer.
+    Task.detached {
+      try? FileManager.default.removeItem(at: targetURL)
+    }
+    return worktree.workingDirectory
+  }
+
+  /// Resolves the workspace *name* (needed for `jj workspace forget`) whose
+  /// resolved root matches `path`. The displayed `Worktree.name` is the bookmark
+  /// (or workspace name), so we can't assume it; match by path instead.
+  nonisolated private func workspaceName(forPath path: URL, repoRoot: URL) async throws -> String? {
+    let target = path.standardizedFileURL.path(percentEncoded: false)
+    for name in try await workspaceNames(for: repoRoot) {
+      guard
+        let rootOutput = try? await runJJ(
+          ["workspace", "root", "--name", name, "--ignore-working-copy"],
+          cwd: repoRoot
+        )
+      else { continue }
+      let resolved = URL(fileURLWithPath: rootOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+        .standardizedFileURL.path(percentEncoded: false)
+      if resolved == target { return name }
+    }
+    return nil
+  }
+
+  /// Maps a base ref to a jj revset: nil for empty (jj defaults to the current
+  /// workspace's parent); a git-style `remote/branch` becomes `branch@remote`
+  /// only when the prefix is a known remote (so a slashed bookmark like
+  /// `feature/x` is left intact); otherwise used as-is (bookmark or revset).
+  nonisolated private func revset(forBaseRef baseRef: String, repoRoot: URL) async -> String? {
+    let trimmed = baseRef.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let remotes = (try? await remoteNames(for: repoRoot)) ?? []
+    if let match = GitReferenceQueries.remotePrefixMatch(ref: trimmed, remoteNames: remotes) {
+      return "\(match.branch)@\(match.remote)"
+    }
+    return trimmed
+  }
+
+  // MARK: - Bookmarks / remotes / fetch
+
+  /// Local bookmark names (lowercased, matching `GitClient.localBranchNames`)
+  /// via `jj bookmark list -T 'name() ++ "\n"'`. The `-T` template emits one
+  /// bare name per line (robust to display/conflict formatting), matching how
+  /// `workspaceNames` reads `jj workspace list`. Used for rename dedup and
+  /// branch listing.
+  nonisolated func bookmarkNames(for repoRoot: URL) async throws -> Set<String> {
+    let output = try await runJJ(
+      ["bookmark", "list", "--ignore-working-copy", "-T", "name() ++ \"\\n\""],
+      cwd: repoRoot.standardizedFileURL
+    )
+    var names: Set<String> = []
+    for rawLine in output.split(whereSeparator: \.isNewline) {
+      let name = String(rawLine).trimmingCharacters(in: .whitespaces)
+      if !name.isEmpty { names.insert(name.lowercased()) }
+    }
+    return names
+  }
+
+  /// Renames a bookmark (`jj bookmark rename`) — the jj counterpart to
+  /// `git branch -m`.
+  nonisolated func renameBookmark(from oldName: String, to newName: String, repoRoot: URL) async throws {
+    _ = try await runJJ(["bookmark", "rename", oldName, newName], cwd: repoRoot.standardizedFileURL)
+  }
+
+  /// Pushes a bookmark to its remote for pull-request prep
+  /// (`jj git push --bookmark <name> --allow-new`). `--allow-new` lets the
+  /// first push of a not-yet-remote bookmark create the remote branch; jj's
+  /// own force-with-lease-style safety checks still apply.
+  nonisolated func pushBookmark(named name: String, remote: String?, repoRoot: URL) async throws {
+    var arguments = ["git", "push", "--bookmark", name, "--allow-new"]
+    if let remote, !remote.trimmingCharacters(in: .whitespaces).isEmpty {
+      arguments += ["--remote", remote]
+    }
+    _ = try await runJJ(arguments, cwd: repoRoot.standardizedFileURL)
+  }
+
+  /// Fetches from a remote (`jj git fetch [--remote <name>]`).
+  nonisolated func fetch(remote: String, repoRoot: URL) async throws {
+    var arguments = ["git", "fetch"]
+    let trimmed = remote.trimmingCharacters(in: .whitespaces)
+    if !trimmed.isEmpty { arguments += ["--remote", trimmed] }
+    _ = try await runJJ(arguments, cwd: repoRoot.standardizedFileURL)
+  }
+
+  /// Remote names via `jj git remote list` (each line: `<name> <url>`).
+  nonisolated func remoteNames(for repoRoot: URL) async throws -> [String] {
+    let output = try await runJJ(["git", "remote", "list"], cwd: repoRoot)
+    return
+      output
+      .split(whereSeparator: \.isNewline)
+      .compactMap { $0.split(separator: " ", maxSplits: 1).first.map(String.init) }
+      .filter { !$0.isEmpty }
+  }
+
   /// Runs `jj` via a login shell so the user's PATH (mise / brew / cargo
   /// installs) is honored, matching how `GitClient` reaches the bundled `wt`.
   nonisolated private func runJJ(_ arguments: [String], cwd: URL) async throws -> String {

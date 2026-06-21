@@ -56,6 +56,9 @@ struct GitClientDependency: Sendable {
   var lineChanges: @Sendable (URL) async -> (added: Int, removed: Int)?
   var remoteNames: @Sendable (_ repoRoot: URL) async throws -> [String]
   var fetchRemote: @Sendable (_ remote: String, _ repoRoot: URL) async throws -> Void
+  /// Pushes a worktree's branch/bookmark to its remote for PR prep. Routed:
+  /// jj → `jj git push --bookmark`; git → `git push -u origin`.
+  var pushBranch: @Sendable (_ name: String, _ repoRoot: URL) async throws -> Void
   var remoteInfo: @Sendable (_ repositoryRoot: URL) async -> GithubRemoteInfo?
 }
 
@@ -86,8 +89,16 @@ extension GitClientDependency: DependencyKey {
       return try await GitClient().worktrees(for: root)
     },
     reconcileSupacodeLocks: { await GitClient().reconcileSupacodeLocks(for: $0) },
-    localBranchNames: { try await GitClient().localBranchNames(for: $0) },
+    localBranchNames: { root in
+      if GitClientDependency.shouldUseJujutsuBackend(for: root) {
+        return try await JJClient().bookmarkNames(for: root)
+      }
+      return try await GitClient().localBranchNames(for: root)
+    },
     renameBranch: { oldName, newName, repoRoot in
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        return try await JJClient().renameBookmark(from: oldName, to: newName, repoRoot: repoRoot)
+      }
       try await GitClient().renameBranch(from: oldName, to: newName, for: repoRoot)
     },
     isValidBranchName: { branchName, repoRoot in
@@ -99,7 +110,17 @@ extension GitClientDependency: DependencyKey {
     ignoredFileCount: { try await GitClient().ignoredFileCount(for: $0) },
     untrackedFileCount: { try await GitClient().untrackedFileCount(for: $0) },
     createWorktree: { name, repoRoot, baseDirectory, copyIgnored, copyUntracked, baseRef in
-      try await GitClient().createWorktree(
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        // jj auto-snapshots; the copy-ignored/untracked flags don't apply.
+        return try await JJClient().createWorkspace(
+          named: name,
+          in: repoRoot,
+          baseDirectory: baseDirectory,
+          baseRef: baseRef,
+          directoryOverride: nil
+        )
+      }
+      return try await GitClient().createWorktree(
         named: name,
         in: repoRoot,
         baseDirectory: baseDirectory,
@@ -108,7 +129,16 @@ extension GitClientDependency: DependencyKey {
       )
     },
     createWorktreeStream: { name, repoRoot, baseDirectory, copyIgnored, copyUntracked, baseRef, directoryOverride in
-      GitClient().createWorktreeStream(
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        return JJClient().createWorkspaceStream(
+          named: name,
+          in: repoRoot,
+          baseDirectory: baseDirectory,
+          baseRef: baseRef,
+          directoryOverride: directoryOverride
+        )
+      }
+      return GitClient().createWorktreeStream(
         named: name,
         in: repoRoot,
         baseDirectory: baseDirectory,
@@ -118,7 +148,10 @@ extension GitClientDependency: DependencyKey {
       )
     },
     removeWorktree: { worktree, deleteBranch in
-      try await GitClient().removeWorktree(worktree, deleteBranch: deleteBranch)
+      if GitClientDependency.shouldUseJujutsuBackend(for: worktree.repositoryRootURL) {
+        return try await JJClient().removeWorkspace(worktree, deleteBookmark: deleteBranch)
+      }
+      return try await GitClient().removeWorktree(worktree, deleteBranch: deleteBranch)
     },
     isBareRepository: { repoRoot in
       try await GitClient().isBareRepository(for: repoRoot)
@@ -135,8 +168,24 @@ extension GitClientDependency: DependencyKey {
       }
       return await GitClient().lineChanges(at: url)
     },
-    remoteNames: { try await GitClient().remoteNames(for: $0) },
-    fetchRemote: { remote, repoRoot in try await GitClient().fetchRemote(remote, for: repoRoot) },
+    remoteNames: { root in
+      if GitClientDependency.shouldUseJujutsuBackend(for: root) {
+        return try await JJClient().remoteNames(for: root)
+      }
+      return try await GitClient().remoteNames(for: root)
+    },
+    fetchRemote: { remote, repoRoot in
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        return try await JJClient().fetch(remote: remote, repoRoot: repoRoot)
+      }
+      try await GitClient().fetchRemote(remote, for: repoRoot)
+    },
+    pushBranch: { name, repoRoot in
+      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+        return try await JJClient().pushBookmark(named: name, remote: nil, repoRoot: repoRoot)
+      }
+      try await GitClient().pushBranch(name, for: repoRoot)
+    },
     remoteInfo: { repositoryRoot in
       await GitClient().remoteInfo(for: repositoryRoot)
     }

@@ -34,20 +34,20 @@
 
 ## 5. Workspace create / remove
 
-- [ ] 5.1 Implement create via `jj workspace add <path> -r <revset> [--name]`; map prompt base-ref to a revset/bookmark; map or hide copy-ignored/untracked toggles (`--sparse-patterns`)
-- [ ] 5.2 Auto-create a bookmark named from the prompt's branch/name field, pointing at the new workspace's working-copy commit, on every workspace creation
-- [ ] 5.3 Implement remove via `jj workspace forget` + directory removal; skip Git lock/prune machinery for jj
-- [ ] 5.4 Reject/translate folder-style and Git-only paths so jj repos route correctly
-- [ ] 5.5 Tests: create and remove flows for a co-located repo (stubbed backend), incl. anonymous-workspace handling
+- [x] 5.1 Implement create via `jj workspace add <path> --name <name> [-r <revset>]`; base-ref→revset translation (remote/branch → branch@remote only for known remotes). (Copy-ignored/untracked are dropped for jj since it auto-snapshots; surfacing this in the prompt UI — hide/relabel the toggles for jj repos — is a small follow-up.)
+- [x] 5.2 Auto-create a bookmark named from the name field at the new workspace's `@` on every create (Decision 7)
+- [x] 5.3 Implement remove via `jj workspace forget` (workspace name resolved by path-match) + directory removal + optional `jj bookmark delete`; no Git lock/prune machinery
+- [x] 5.4 Routing handles it: colocated repos are git repos so they pass the existing `isGitRepository` guards, then `shouldUseJujutsuBackend` sends create/remove to the jj backend; the main-worktree guard still protects the primary
+- [x] 5.5 Tests: create (add + remote-ref translation + auto-bookmark), slashed-bookmark untranslated, remove (forget-by-path-match + bookmark delete)
 
 ## 6. Bookmarks, fetch, push + external automation
 
-- [ ] 6.1 Map branch rename/delete to `jj bookmark rename` / `jj bookmark delete`; re-author `RenameBranchFeature` stderr translation for jj messages and detect conflicted bookmarks (`name??`)
-- [ ] 6.2 Map fetch to `jj git fetch`
-- [ ] 6.3 Add a bookmark push action (`jj git push --bookmark <name>`) for PR prep, exposed on the toolbar and the CLI/deeplink surface
-- [ ] 6.4 Confirm GitHub PR tracking matches PRs to workspaces by pushed bookmark name (no `gh` changes expected)
-- [ ] 6.5 Route `supacode-cli` (`repo worktree-new`, `worktree delete`, etc.) and `supacode://` deeplinks to the jj backend for co-located repos, keeping verbs/vocabulary unchanged
-- [ ] 6.6 Tests: bookmark ops, fetch, CLI/deeplink routing for co-located repos
+- [x] 6.1 Branch rename → `jj bookmark rename` (routed; rename flow works for jj workspaces); delete → `jj bookmark delete` (via `removeWorkspace`, Phase 5). ⏳ Follow-up: re-author `RenameBranchFeature` stderr translation for jj messages + detect conflicted bookmarks (`name??`).
+- [x] 6.2 Map fetch to `jj git fetch` (routed `fetchRemote`/`remoteNames`)
+- [x] 6.3 Bookmark push: backend (`JJClient.pushBookmark`) + surface as **CLI + deeplink** (`supacode worktree push`, `supacode://worktree/<id>/push` → `RepositoriesFeature.pushWorktreeBookmark` → routed `GitClientDependency.pushBranch`). Toolbar action intentionally omitted (user chose CLI/deeplink). Push also works for git worktrees (`git push -u origin`).
+- [x] 6.4 No code: GitHub PR tracking matches by `headRefName` = the pushed bookmark/branch name, so a pushed bookmark is tracked exactly like a git branch (the `gh`/GraphQL path is backend-agnostic).
+- [x] 6.5 Existing CLI/deeplink verbs (`repo worktree-new`, `worktree delete`, rename) already route to the jj backend — they dispatch the same reducer actions → routed `GitClientDependency` closures. New `push` verb added (6.3).
+- [x] 6.6 Tests: bookmark name parsing, rename, fetch, push command shapes (`JJClientTests`). ⏳ Reducer-level routing test still deferred to Phase 8.
 
 ## 7. Working-copy watcher
 

@@ -76,6 +76,15 @@ struct Repository: Identifiable, Hashable, Sendable {
     self.vcs = vcs
   }
 
+  /// Returns a copy with a new worktree set, preserving every other field —
+  /// crucially `vcs`. In-place rebuilders MUST use this rather than the
+  /// `init(isGitRepository:)` back-compat initializer, whose `isGitRepository`
+  /// defaults to `true` and would silently reclassify a `.gitColocatedJJ`
+  /// (or `.folder`) repository as `.git` on the next worktree mutation.
+  func replacingWorktrees(_ worktrees: IdentifiedArrayOf<Worktree>) -> Repository {
+    Repository(id: id, rootURL: rootURL, name: name, worktrees: worktrees, vcs: vcs)
+  }
+
   var initials: String {
     Self.initials(from: name)
   }

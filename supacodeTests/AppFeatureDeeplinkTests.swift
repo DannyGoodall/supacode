@@ -87,6 +87,24 @@ struct AppFeatureDeeplinkTests {
     await store.receive(\.repositories.pinWorktree)
   }
 
+  @Test(.dependencies) func pushWorktreeDeeplinkRoutesToPushBookmark() async {
+    let worktree = makeWorktree()
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.gitClient.pushBranch = { _, _ in }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .push)))
+    await store.receive(\.repositories.pushWorktreeBookmark)
+  }
+
   @Test(.dependencies) func unpinWorktreeDeeplink() async {
     let worktree = makeWorktree()
     var repositories = makeRepositoriesState(worktree: worktree)

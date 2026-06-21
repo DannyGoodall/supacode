@@ -29,6 +29,9 @@ enum Deeplink: Equatable, Sendable {
     case delete
     case pin
     case unpin
+    /// Push the worktree's branch/bookmark to its remote for PR prep
+    /// (jj: `jj git push --bookmark`; git: `git push -u origin`).
+    case push
     case tab(tabID: UUID)
     case tabNew(input: String?, id: UUID?)
     case tabDestroy(tabID: UUID)
