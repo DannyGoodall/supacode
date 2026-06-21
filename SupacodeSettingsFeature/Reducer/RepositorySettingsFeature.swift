@@ -9,6 +9,9 @@ public struct RepositorySettingsFeature {
   public struct State: Equatable {
     public var rootURL: URL
     public var isGitRepository: Bool
+    /// Co-located git+jj repo with the experimental gate on — gates the
+    /// per-repo "prefer jj" control.
+    public var isColocatedJJ: Bool = false
     public var settings: RepositorySettings
     public var globalDefaultWorktreeBaseDirectoryPath: String?
     public var globalCopyIgnoredOnWorktreeCreate: Bool = false
@@ -33,6 +36,7 @@ public struct RepositorySettingsFeature {
     public init(
       rootURL: URL,
       isGitRepository: Bool = true,
+      isColocatedJJ: Bool = false,
       settings: RepositorySettings,
       globalDefaultWorktreeBaseDirectoryPath: String? = nil,
       globalCopyIgnoredOnWorktreeCreate: Bool = false,
@@ -45,6 +49,7 @@ public struct RepositorySettingsFeature {
     ) {
       self.rootURL = rootURL
       self.isGitRepository = isGitRepository
+      self.isColocatedJJ = isColocatedJJ
       self.settings = settings
       self.globalDefaultWorktreeBaseDirectoryPath = globalDefaultWorktreeBaseDirectoryPath
       self.globalCopyIgnoredOnWorktreeCreate = globalCopyIgnoredOnWorktreeCreate

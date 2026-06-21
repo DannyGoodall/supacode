@@ -131,6 +131,27 @@ struct RepositoryJJColocationTests {
     #expect(repo.isColocatedJJ)
   }
 
+  // MARK: - Backend resolver (vcs × preferJJ)
+
+  @Test func colocatedWithUnsetPreferenceUsesJujutsu() {
+    #expect(Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: nil))
+    #expect(Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: true))
+  }
+
+  @Test func colocatedWithGitOverrideUsesGit() {
+    #expect(!Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: false))
+  }
+
+  @Test func plainGitIsNeverJujutsuEvenWhenPreferred() {
+    #expect(!Repository.usesJujutsuBackend(vcs: .git, preferJJ: true))
+    #expect(!Repository.usesJujutsuBackend(vcs: .git, preferJJ: nil))
+  }
+
+  @Test func folderIsNeverJujutsu() {
+    #expect(!Repository.usesJujutsuBackend(vcs: .folder, preferJJ: true))
+    #expect(!Repository.usesJujutsuBackend(vcs: .folder, preferJJ: nil))
+  }
+
   // MARK: - Loader gate (git / jj+git / none)
 
   private func loaderState(root: URL) -> RepositoriesFeature.State {

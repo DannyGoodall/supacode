@@ -1,0 +1,66 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+context: |
+  Product: Supacode — a macOS orchestrator for running multiple coding agents
+  in parallel, using GhosttyKit as the underlying terminal. Each unit of work
+  is a Git worktree; the sidebar, terminal tabs, scripts, and PR tracking are
+  all keyed off worktrees.
+
+  Tech stack:
+  - Swift 6, targeting macOS 26.0+ (tests target 26.1). Default actor isolation
+    is MainActor (SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor); off-main code is
+    marked `nonisolated`.
+  - TCA (pointfreeco/swift-composable-architecture) for app state/reducers/effects.
+  - swift-dependencies for DI of clients; swift-sharing (`@Shared(.appStorage(...))`)
+    for app/shared settings (read directly in reducers — do not wrap @Shared in a
+    new client).
+  - GhosttyKit (built from Zig source in ThirdParty/ghostty) for the terminal.
+  - Tuist (+ mise) for project generation/build; Sparkle, PostHog, Sentry.
+
+  VCS model (the subject of most changes here):
+  - The product ASSUMES Git + Git worktrees. A root is classified at load time
+    as a git repository or a plain (non-git) "folder" via
+    `Repository.isGitRepository(at:)`. Folders are a deliberately limited
+    fallback (no worktree create, archive, branch ops).
+  - Git is automated through `GitClientDependency`/`GitClient` (and the bundled
+    `Resources/git-wt` `wt` CLI for worktree create/list), `GitReferenceQueries`
+    (branch/ref queries), the `WorktreeInfoWatcher` (watches `.git/HEAD`), and
+    `GithubCLIClient` (wraps the `gh` CLI for PRs/checks/merge).
+  - Jujutsu (jj) work in this repo targets ONLY co-located jj repos — where `.jj`
+    and `.git` sit as peers in the repository root (jj's own definition of
+    "colocated") — because a co-located jj repo is still a valid git repo, so
+    every existing git path keeps working and jj is strictly additive.
+
+  Key conventions (see CLAUDE.md):
+  - `@ObservableState` for TCA state; `@Observable` + `@MainActor` for non-TCA
+    shared stores; never `ObservableObject`.
+  - Use `SupaLogger`, never `print()`/`os.Logger` directly.
+  - Avoid top-level free functions; prefer `static` on a caseless enum / relevant
+    type, or instance/computed members.
+  - Modern SwiftUI only (`foregroundStyle`, `NavigationStack`, `Button`).
+  - 2-space indent, 120-col lines, trailing commas mandatory in collection
+    literals (not function-call arg lists), SwiftLint strict
+    (e.g. `function_body_length` <= 100). Custom rule: no `store.*` mutation in views.
+  - Build/verify: `make build-app`, `make test`, `make check` (need mise + Tuist;
+    CI runs on macos-26 with Xcode <= 26.3 because Zig 0.15.2 cannot link the
+    macOS 26.4+ SDK — ziglang/zig#31272).
+
+# Per-artifact rules (optional)
+rules:
+  proposal:
+    - Always include a "Non-goals" section.
+    - State explicitly which behavior is gated behind a setting vs always-on.
+  design:
+    - Document semantic gaps and risks explicitly (e.g. jj has no "current
+      bookmark"; jj auto-snapshots the working copy; bookmarks can be conflicted).
+    - Reference concrete integration points by `file:line` where it aids the reader.
+    - Call out backward-compatibility guarantees and how they are preserved.
+  tasks:
+    - Every new or changed reducer behavior must ship with tests.
+    - Each task should be independently verifiable (a build, a test, or an
+      observable behavior).
+    - Preserve the git/none contract — existing consumers of `isGitRepository`
+      must be unaffected; new VCS flavors are additive and gated.
+    - Group tasks by implementation phase; mark already-delivered phases done.

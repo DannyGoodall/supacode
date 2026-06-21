@@ -5,6 +5,10 @@ import SwiftUI
 
 struct DeveloperSettingsView: View {
   @Bindable var store: StoreOf<SettingsFeature>
+  // Source of truth for the experimental jj gate is the @Shared app-storage
+  // key the repository loader reads (RepositoriesFeature.loadRepositoriesData),
+  // not SettingsFeature/GlobalSettings — so bind the toggle straight to it.
+  @Shared(.experimentalJJIntegration) private var experimentalJJIntegration: Bool
 
   var body: some View {
     Form {
@@ -45,6 +49,17 @@ struct DeveloperSettingsView: View {
             "Re-installs hooks for any agent reporting an outdated integration when Supacode comes to the foreground.")
         }
         .help("Silently re-applies the canonical hook layout to outdated agent integrations when Supacode activates.")
+      }
+      Section {
+        Toggle(isOn: Binding($experimentalJJIntegration)) {
+          Text("Use experimental co-located JJ integration")
+          Text(
+            "Detect repositories that have Jujutsu (jj) co-located with Git (a `.jj` directory beside `.git`) and "
+            + "offer jj-native equivalents. Off by default; takes effect on the next repository load.")
+        }
+        .help("Experimental. When off, co-located repositories behave exactly as plain Git repositories.")
+      } header: {
+        Text("Experimental")
       }
     }
     .formStyle(.grouped)

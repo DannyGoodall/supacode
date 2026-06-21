@@ -326,7 +326,8 @@ struct AppFeature {
                   SettingsRepositorySummary(
                     id: $0.id,
                     name: $0.name,
-                    isGitRepository: $0.isGitRepository
+                    isGitRepository: $0.isGitRepository,
+                    isColocatedJJ: $0.isColocatedJJ
                   )
                 }
               )

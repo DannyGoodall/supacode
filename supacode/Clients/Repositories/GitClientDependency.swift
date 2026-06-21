@@ -72,7 +72,19 @@ extension GitClientDependency: DependencyKey {
       )
       return exists && isDirectory.boolValue
     },
-    worktrees: { try await GitClient().worktrees(for: $0) },
+    worktrees: { root in
+      // Route co-located repos that prefer jj to the Jujutsu backend; on any
+      // jj failure (CLI missing/errored) degrade gracefully to Git so a
+      // colocated repo never fails to load.
+      if GitClientDependency.shouldUseJujutsuBackend(for: root) {
+        do {
+          return try await JJClient().workspaces(for: root)
+        } catch {
+          return try await GitClient().worktrees(for: root)
+        }
+      }
+      return try await GitClient().worktrees(for: root)
+    },
     reconcileSupacodeLocks: { await GitClient().reconcileSupacodeLocks(for: $0) },
     localBranchNames: { try await GitClient().localBranchNames(for: $0) },
     renameBranch: { oldName, newName, repoRoot in
@@ -111,8 +123,18 @@ extension GitClientDependency: DependencyKey {
     isBareRepository: { repoRoot in
       try await GitClient().isBareRepository(for: repoRoot)
     },
-    branchName: { await GitClient().branchName(for: $0) },
-    lineChanges: { await GitClient().lineChanges(at: $0) },
+    branchName: { url in
+      if GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) {
+        return await JJClient().branchName(forWorkspaceAt: url)
+      }
+      return await GitClient().branchName(for: url)
+    },
+    lineChanges: { url in
+      if GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) {
+        return await JJClient().lineChanges(at: url)
+      }
+      return await GitClient().lineChanges(at: url)
+    },
     remoteNames: { try await GitClient().remoteNames(for: $0) },
     fetchRemote: { remote, repoRoot in try await GitClient().fetchRemote(remote, for: repoRoot) },
     remoteInfo: { repositoryRoot in
@@ -133,6 +155,42 @@ extension GitClientDependency: DependencyKey {
     value.rootDirectoryExists = { _ in true }
     value.reconcileSupacodeLocks = { _ in }
     return value
+  }
+}
+
+extension GitClientDependency {
+  /// Whether VCS operations for `root` should be routed to the Jujutsu
+  /// backend. True only when the experimental gate is on, the root is a
+  /// colocated git+jj repository, and the per-repo `preferJJ` is not an
+  /// explicit Git override (`preferJJ ?? true`). Pure/synchronous reads so it
+  /// can gate the dependency's live closures cheaply.
+  nonisolated static func shouldUseJujutsuBackend(for root: URL) -> Bool {
+    @Shared(.experimentalJJIntegration) var experimentalJJIntegration
+    guard experimentalJJIntegration else { return false }
+    guard Repository.isColocatedJJRepository(at: root) else { return false }
+    @Shared(.repositorySettings(root)) var repositorySettings
+    return Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: repositorySettings.preferJJ)
+  }
+
+  /// Working-copy-level variant for ops keyed by a worktree/workspace path
+  /// (e.g. `branchName`, `lineChanges`) rather than a repo root. A jj working
+  /// copy has a `.jj` directory: a colocated *primary* also has `.git` (so we
+  /// honor that repo's `preferJJ`), while a secondary jj workspace is jj-only.
+  nonisolated static func shouldUseJujutsuBackendForWorkingCopy(at url: URL) -> Bool {
+    @Shared(.experimentalJJIntegration) var experimentalJJIntegration
+    guard experimentalJJIntegration else { return false }
+    let base = url.standardizedFileURL
+    // Colocated primary (git + `.jj`) — single source of the colocation
+    // definition. Honor the per-repo preferJJ override.
+    if Repository.isColocatedJJRepository(at: base) {
+      @Shared(.repositorySettings(base)) var repositorySettings
+      return Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: repositorySettings.preferJJ)
+    }
+    // Secondary jj-only workspace (a `.jj` directory with no sibling `.git`):
+    // gate on + `.jj` present → jj.
+    let jjPath = base.appending(path: ".jj", directoryHint: .isDirectory).path(percentEncoded: false)
+    var isDirectory: ObjCBool = false
+    return FileManager.default.fileExists(atPath: jjPath, isDirectory: &isDirectory) && isDirectory.boolValue
   }
 }
 

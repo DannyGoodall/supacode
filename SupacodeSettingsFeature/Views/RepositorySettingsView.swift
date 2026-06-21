@@ -41,6 +41,22 @@ public struct RepositorySettingsView: View {
           }
         }
       }
+      if store.isColocatedJJ {
+        Section {
+          Picker(selection: settings.preferJJ) {
+            Text("Default \(Text("Use Jujutsu").foregroundStyle(.secondary))")
+              .tag(Bool?.none)
+            Text("Use Jujutsu").tag(Bool?.some(true))
+            Text("Use Git").tag(Bool?.some(false))
+          } label: {
+            Text("Version control")
+            Text("This repository has Jujutsu (jj) co-located with Git. Choose which Supacode drives "
+              + "for worktrees/workspaces and branches/bookmarks.")
+          }
+        } header: {
+          Text("Version Control")
+        }
+      }
       Section {
         Picker(selection: settings.copyIgnoredOnWorktreeCreate) {
           Text("Global \(Text(store.globalCopyIgnoredOnWorktreeCreate ? "Yes" : "No").foregroundStyle(.secondary))")
