@@ -50,8 +50,9 @@ public struct RepositorySettingsView: View {
             Text("Use Git").tag(Bool?.some(false))
           } label: {
             Text("Version control")
-            Text("This repository has Jujutsu (jj) co-located with Git. Choose which Supacode drives "
-              + "for worktrees/workspaces and branches/bookmarks.")
+            Text(
+              "This repository has Jujutsu (jj) co-located with Git. Choose which Supacode drives "
+                + "for worktrees/workspaces and branches/bookmarks.")
           }
         } header: {
           Text("Version Control")

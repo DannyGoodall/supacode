@@ -173,20 +173,40 @@ final class WorktreeInfoWatcherManager {
   }
 
   private func configureWatcher(for worktree: Worktree) {
-    guard
-      let headURL = GitWorktreeHeadResolver.headURL(
-        for: worktree.workingDirectory,
-        fileManager: .default
-      )
-    else {
+    guard let watchURL = Self.watchURL(for: worktree) else {
       stopWatcher(for: worktree.id)
       return
     }
-    if let existing = headWatchers[worktree.id], existing.headURL == headURL {
+    if let existing = headWatchers[worktree.id], existing.headURL == watchURL {
       return
     }
     stopWatcher(for: worktree.id)
-    startWatcher(worktreeID: worktree.id, headURL: headURL)
+    startWatcher(worktreeID: worktree.id, headURL: watchURL)
+  }
+
+  /// The filesystem path to watch for VCS state changes. For a co-located repo
+  /// using the jj backend it's the repository's `.jj/repo/op_heads/heads`
+  /// (replaced on every real jj operation); otherwise git's `HEAD`. Both feed the same
+  /// debounced branch/file-change pipeline, and the branch label is re-derived
+  /// downstream via the already-jj-routed `gitClient.branchName` (which reads
+  /// with `--ignore-working-copy`, so a watcher-triggered read can't snapshot
+  /// and re-fire the watcher).
+  private static func watchURL(for worktree: Worktree) -> URL? {
+    if GitClientDependency.shouldUseJujutsuBackend(for: worktree.repositoryRootURL) {
+      // Watch the jj operation-log head, NOT `.jj/working_copy`. The latter
+      // churned and each vnode event spawned login-shell `jj` reads, saturating
+      // the main actor. `op_heads/heads` changes only on real jj operations and
+      // never on our `--ignore-working-copy` reads, so it can't feed back into
+      // itself and fires far less often. Shared across the repo's workspaces.
+      return JJWorktreeStateResolver.opHeadsURL(
+        forRepositoryRoot: worktree.repositoryRootURL,
+        fileManager: .default
+      )
+    }
+    return GitWorktreeHeadResolver.headURL(
+      for: worktree.workingDirectory,
+      fileManager: .default
+    )
   }
 
   private func startWatcher(worktreeID: Worktree.ID, headURL: URL) {
