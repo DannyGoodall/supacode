@@ -220,7 +220,10 @@ struct WorktreeDetailView: View {
           store.send(.repositories(.requestRemoveFailedRepository(failedRepositoryID)))
         }
       } else if let selectedWorktree, selectedWorktree.isMissing {
-        MissingWorktreeDetailView(worktree: selectedWorktree) {
+        MissingWorktreeDetailView(
+          worktree: selectedWorktree,
+          vocab: repositories.worktreeVocabulary(forWorktree: selectedWorktree.id)
+        ) {
           guard let repositoryID = repositories.sidebarItems[id: selectedWorktree.id]?.repositoryID
           else { return }
           let target = RepositoriesFeature.DeleteWorktreeTarget(
@@ -596,7 +599,8 @@ struct WorktreeDetailView: View {
         worktreeSubtitle: worktreeSubtitle,
         worktreeTint: selectedRow?.customTint,
         accent: selectedRow?.accent ?? .default,
-        rootURL: selectedWorktree.repositoryRootURL
+        rootURL: selectedWorktree.repositoryRootURL,
+        jjChangeId: selectedRow?.jjChangeId
       )
     )
   }
@@ -703,6 +707,7 @@ private struct FailedRepositoryDetailView: View {
 
 private struct MissingWorktreeDetailView: View {
   let worktree: Worktree
+  let vocab: WorktreeVocabulary
   let requestDelete: () -> Void
 
   var body: some View {
@@ -711,14 +716,16 @@ private struct MissingWorktreeDetailView: View {
         .foregroundStyle(.orange)
     } description: {
       VStack(spacing: 6) {
-        Text("Restore the directory to keep working here, or delete this worktree to clean up.")
+        Text(
+          "Restore the directory to keep working here, or delete this \(vocab.workspaceNoun.lowercased()) to clean up."
+        )
         Text(worktree.workingDirectory.path(percentEncoded: false))
           .monospaced()
           .textSelection(.enabled)
       }
     } actions: {
-      Button("Delete Worktree…", systemImage: "trash", role: .destructive, action: requestDelete)
-        .help("Delete this worktree from Supacode.")
+      Button(vocab.delete(plural: false), systemImage: "trash", role: .destructive, action: requestDelete)
+        .help("Delete this \(vocab.workspaceNoun.lowercased()) from Supacode.")
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
@@ -1097,7 +1104,8 @@ private struct WorktreeToolbarPreview: View {
           worktreeSubtitle: "toolbar-preview",
           worktreeTint: nil,
           accent: .pinned,
-          rootURL: URL(fileURLWithPath: "/tmp/preview")
+          rootURL: URL(fileURLWithPath: "/tmp/preview"),
+          jjChangeId: ChangeIdDisplay(prefix: "qpv", rest: "wxyz")
         )
       ),
       rootURL: URL(fileURLWithPath: "/tmp/preview"),

@@ -55,7 +55,8 @@ struct SidebarItemView: View {
           accent: resolved.accent,
           customTint: store.customTint,
           isLifecycleBusy: store.lifecycle.isBusy,
-          isTaskRunning: store.isTaskRunning
+          isTaskRunning: store.isTaskRunning,
+          jjChangeId: store.jjChangeId
         )
         .equatable()
         Spacer(minLength: 0)
@@ -72,7 +73,8 @@ struct SidebarItemView: View {
         branchName: store.branchName,
         pullRequest: store.pullRequest,
         showsPullRequestInfo: showsPullRequestInfo,
-        lifecycle: store.lifecycle
+        lifecycle: store.lifecycle,
+        isColocatedJJ: store.isColocatedJJ
       )
     }
     .labelStyle(.verticallyCentered)
@@ -249,6 +251,8 @@ private struct TitleView: View, Equatable {
   let customTint: RepositoryColor?
   let isLifecycleBusy: Bool
   let isTaskRunning: Bool
+  /// jj change id of `@` (prefix + rest); `nil` for git rows.
+  let jjChangeId: ChangeIdDisplay?
   // `==` ignores @Environment; SwiftUI tracks env changes separately.
   @Environment(\.backgroundProminence) private var backgroundProminence
 
@@ -259,6 +263,7 @@ private struct TitleView: View, Equatable {
       && lhs.customTint == rhs.customTint
       && lhs.isLifecycleBusy == rhs.isLifecycleBusy
       && lhs.isTaskRunning == rhs.isTaskRunning
+      && lhs.jjChangeId == rhs.jjChangeId
   }
 
   var body: some View {
@@ -269,10 +274,26 @@ private struct TitleView: View, Equatable {
       let titleText = Text(name)
         .font(.body)
         .lineLimit(1)
-      if let customTint, !isEmphasized {
-        titleText.foregroundStyle(customTint.color).shimmer(isActive: isBusy)
-      } else {
-        titleText.shimmer(isActive: isBusy)
+      // `.firstTextBaseline` so the change id sits on the name's baseline
+      // (bottom-aligned look) rather than centering the smaller text up top.
+      HStack(alignment: .firstTextBaseline, spacing: 5) {
+        Group {
+          if let customTint, !isEmphasized {
+            titleText.foregroundStyle(customTint.color).shimmer(isActive: isBusy)
+          } else {
+            titleText.shimmer(isActive: isBusy)
+          }
+        }
+        .layoutPriority(1)
+        // jj change id chip. A selected row reverts the prefix to the default
+        // foreground; otherwise it uses the row's custom tint (else bright).
+        if let jjChangeId {
+          let prefixStyle: AnyShapeStyle =
+            isEmphasized
+            ? AnyShapeStyle(.primary)
+            : (customTint.map { AnyShapeStyle($0.color) } ?? AnyShapeStyle(.primary))
+          ChangeIdChip(changeId: jjChangeId, prefixStyle: prefixStyle)
+        }
       }
       switch subtitle {
       case .none:
@@ -317,20 +338,34 @@ private struct IconView: View {
   let pullRequest: GithubPullRequest?
   let showsPullRequestInfo: Bool
   let lifecycle: SidebarItemFeature.State.Lifecycle
+  let isColocatedJJ: Bool
 
   var body: some View {
     let display = WorktreePullRequestDisplay(
       worktreeName: branchName,
       pullRequest: showsPullRequestInfo ? pullRequest : nil,
     )
-    IconContent(
-      isFolder: isFolder,
-      isMissing: isMissing,
-      icon: SidebarPullRequestIcon.resolve(display.pullRequest),
-      checkBadgeState: resolveCheckBadgeState(display.pullRequest),
-      rowState: IconRowState(lifecycle),
-    )
-    .equatable()
+    HStack(alignment: .top, spacing: 1) {
+      IconContent(
+        isFolder: isFolder,
+        isMissing: isMissing,
+        icon: SidebarPullRequestIcon.resolve(display.pullRequest),
+        checkBadgeState: resolveCheckBadgeState(display.pullRequest),
+        rowState: IconRowState(lifecycle),
+      )
+      .equatable()
+      // Distinguish jj workspaces/bookmarks from git worktrees/branches. Small,
+      // tucked tight against the top of the branch glyph. (SF Symbol — the
+      // branch glyph itself is the custom `git-branch` asset.)
+      if isColocatedJJ, !isFolder {
+        Image(systemName: "bird")
+          .resizable()
+          .aspectRatio(contentMode: .fit)
+          .frame(width: 9, height: 9)
+          .foregroundStyle(.secondary)
+          .accessibilityLabel("Jujutsu")
+      }
+    }
   }
 }
 

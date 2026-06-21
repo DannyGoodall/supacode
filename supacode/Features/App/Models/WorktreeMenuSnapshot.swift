@@ -18,6 +18,10 @@ struct WorktreeMenuSnapshot: Equatable {
   var isInitialLoadComplete: Bool = false
   var selectedPullRequestURL: URL?
   var notificationIndicatorCount: Int = 0
+  /// Vocabulary for the currently-selected worktree's repository, so the
+  /// Worktrees menu reads jj-native (Workspace/Bookmark) when a jj row is
+  /// selected and git terms otherwise.
+  var selectedWorktreeVocabulary: WorktreeVocabulary = .git
 }
 
 extension AppFeature.State {
@@ -35,7 +39,10 @@ extension AppFeature.State {
       canNavigateForward: repositories.canNavigateWorktreeHistoryForward,
       isInitialLoadComplete: repositories.isInitialLoadComplete,
       selectedPullRequestURL: pullRequestURL,
-      notificationIndicatorCount: notificationIndicatorCount
+      notificationIndicatorCount: notificationIndicatorCount,
+      selectedWorktreeVocabulary: repositories.worktreeVocabulary(
+        forWorktree: repositories.selectedWorktreeID
+      )
     )
   }
 
@@ -71,6 +78,9 @@ extension AppFeature.State {
       }
       if old.notificationIndicatorCount != new.notificationIndicatorCount {
         diffs.append("notificationIndicatorCount")
+      }
+      if old.selectedWorktreeVocabulary != new.selectedWorktreeVocabulary {
+        diffs.append("selectedWorktreeVocabulary")
       }
       menuSnapshotLogger.info("MenuSnapshot mutated. Fields: \(diffs.joined(separator: ", "))")
     }

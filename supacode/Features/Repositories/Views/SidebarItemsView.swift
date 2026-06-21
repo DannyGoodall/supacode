@@ -634,6 +634,7 @@ private struct SidebarItemContextMenu: View {
     let archiveShortcut = AppShortcuts.archiveWorktree.effective(from: overrides)
     let deleteShortcut = AppShortcuts.deleteWorktree.effective(from: overrides)
     let isAllFoldersBulk = isAllFoldersBulk
+    let vocab = store.state.worktreeVocabulary(forRepository: repositoryID)
 
     if !isBulkSelection, !worktree.isMissing {
       openActions(overrides: overrides)
@@ -648,7 +649,7 @@ private struct SidebarItemContextMenu: View {
         NSPasteboard.general.setString(worktree.workingDirectory.path, forType: .string)
       }
       if !rowIsFolder {
-        Button("Copy as Branch Name") {
+        Button(vocab.copyAsBranchName) {
           NSPasteboard.general.clearContents()
           NSPasteboard.general.setString(worktree.name, forType: .string)
         }
@@ -659,10 +660,14 @@ private struct SidebarItemContextMenu: View {
         !worktree.isMissing,
         worktree.isAttached
       {
-        Button("Rename Branch…", systemImage: "pencil") {
+        Button(vocab.renameBranch, systemImage: "pencil") {
           store.send(.requestRenameBranch(worktree.id, repositoryID))
         }
-        .help("Rename the local branch for this worktree")
+        .help(
+          vocab.isJJ
+            ? "Rename the bookmark for this workspace"
+            : "Rename the local branch for this worktree"
+        )
       }
       Divider()
       if rowIsFolder {
@@ -709,7 +714,7 @@ private struct SidebarItemContextMenu: View {
     }
 
     if !archiveTargets.isEmpty {
-      let archiveLabel = isBulkSelection ? "Archive Worktrees…" : "Archive Worktree…"
+      let archiveLabel = vocab.archive(plural: isBulkSelection)
       Button(archiveLabel, systemImage: "archivebox") {
         if archiveTargets.count == 1, let target = archiveTargets.first {
           store.send(.requestArchiveWorktree(target.worktreeID, target.repositoryID))
@@ -722,8 +727,8 @@ private struct SidebarItemContextMenu: View {
     if !deleteTargets.isEmpty {
       let deleteLabel =
         isBulkSelection
-        ? (isAllFoldersBulk ? "Remove Folders…" : "Delete Worktrees…")
-        : (rowIsFolder ? "Remove Folder…" : "Delete Worktree…")
+        ? (isAllFoldersBulk ? "Remove Folders…" : vocab.delete(plural: true))
+        : (rowIsFolder ? "Remove Folder…" : vocab.delete(plural: false))
       Button(deleteLabel, systemImage: "trash", role: .destructive) {
         store.send(.requestDeleteSidebarItems(deleteTargets))
       }
@@ -741,9 +746,12 @@ private struct SidebarItemContextMenu: View {
     if !pinnableRows.isEmpty {
       let allPinned = pinnableRows.allSatisfy(\.isPinned)
       let allFolders = pinnableRows.allSatisfy(\.isFolder)
-      // Folder-only selection reads "Pin Folder" / "Pin Folders"; mixed or
-      // git-only fall back to "Worktree" so the label stays accurate.
-      let noun = allFolders ? "Folder" : "Worktree"
+      // Folder-only selection reads "Pin Folder" / "Pin Folders"; otherwise the
+      // flavor-aware noun ("Worktree" for git, "Workspace" for jj).
+      let noun =
+        allFolders
+        ? "Folder"
+        : store.state.worktreeVocabulary(forRepository: repositoryID).workspaceNoun
       if allPinned {
         let label = isBulkSelection ? "Unpin \(noun)s" : "Unpin \(noun)"
         Button(label, systemImage: "pin.slash") {

@@ -10,7 +10,7 @@ struct WorktreeCreationPromptView: View {
   var body: some View {
     Form {
       Section {
-        TextField("Branch name", text: $store.branchName)
+        TextField(store.vocab.branchNameField, text: $store.branchName)
           .focused($isBranchFieldFocused)
           .onSubmit {
             store.send(.createButtonTapped)
@@ -18,8 +18,8 @@ struct WorktreeCreationPromptView: View {
       } header: {
         // `NavigationStack` with title and subtitle is bugged inside
         // sheets in macOS 26.*, and this is a nice enough fallback.
-        Text("New Worktree")
-        Text("Create a branch in `\(store.repositoryName)`.")
+        Text(store.vocab.newWorktree)
+        Text("Create a \(store.vocab.bookmarkNoun.lowercased()) in `\(store.repositoryName)`.")
       } footer: {
         WorktreeCreationFooter(store: store)
       }
@@ -91,7 +91,9 @@ private struct WorktreeOptionsSection: View {
     Section("Advanced", isExpanded: $store.showAdvancedOptions) {
       // Title-string fields so tapping the label focuses the field, matching
       // the branch-name field above.
-      TextField("Worktree name", text: $store.worktreeNameOverride, prompt: Text(store.worktreeNamePlaceholder))
+      TextField(
+        "\(store.vocab.workspaceNoun) name", text: $store.worktreeNameOverride,
+        prompt: Text(store.worktreeNamePlaceholder))
       TextField("Parent folder", text: $store.worktreePathOverride, prompt: Text(store.defaultWorktreeBaseDirectory))
     }
   }
@@ -132,8 +134,12 @@ private struct WorktreeBaseRefField: View {
         }
       }
     } label: {
-      Text("Base ref")
-      Text("The branch or ref the new worktree will be created from.")
+      Text(store.vocab.baseRefLabel)
+      Text(
+        store.vocab.isJJ
+          ? "The bookmark or revision the new workspace will be created from."
+          : "The branch or ref the new worktree will be created from."
+      )
     }
   }
 }

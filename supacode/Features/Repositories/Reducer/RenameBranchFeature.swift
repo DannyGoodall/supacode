@@ -13,20 +13,28 @@ struct RenameBranchFeature {
     var newName: String
     var isSubmitting = false
     var validationMessage: String?
+    /// Whether this repository uses the jj backend, so the prompt reads in
+    /// bookmark vocabulary (set at creation from the parent reducer).
+    let isColocatedJJ: Bool
 
     var id: Worktree.ID { worktreeID }
+
+    /// Flavor-aware labels for the prompt.
+    var vocab: WorktreeVocabulary { WorktreeVocabulary(isJJ: isColocatedJJ) }
 
     init(
       worktreeID: Worktree.ID,
       repositoryID: Repository.ID,
       repositoryRootURL: URL,
-      currentName: String
+      currentName: String,
+      isColocatedJJ: Bool = false
     ) {
       self.worktreeID = worktreeID
       self.repositoryID = repositoryID
       self.repositoryRootURL = repositoryRootURL
       self.currentName = currentName
       self.newName = currentName
+      self.isColocatedJJ = isColocatedJJ
     }
 
     var trimmedName: String {

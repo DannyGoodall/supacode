@@ -23,6 +23,8 @@ extension RepositoriesFeature {
 
     for repository in state.repositories {
       let kind: SidebarItemFeature.State.Kind = repository.isGitRepository ? .gitWorktree : .folder
+      // Per-repo (not per-worktree): cheap, and reconcile isn't a hot path.
+      let isColocatedJJ = state.usesJujutsuBackend(forRepository: repository.id)
       for worktree in state.orderedWorktreesIncludingArchivedWithRunningDeleteScript(in: repository) {
         let id = worktree.id
         let existing = previousByID[id: id]
@@ -64,6 +66,8 @@ extension RepositoriesFeature {
         item.isMainWorktree = isMain
         item.isPinned = isPinned
         item.isMissing = worktree.isMissing
+        item.isColocatedJJ = isColocatedJJ
+        item.jjChangeId = worktree.jjChangeId
         // Mirror per-worktree customization from `@Shared(.sidebar)`. Reading
         // through the currently-owning bucket survives pin / unpin / archive
         // transitions because the bucket-flow `move` carries the `Item` over.

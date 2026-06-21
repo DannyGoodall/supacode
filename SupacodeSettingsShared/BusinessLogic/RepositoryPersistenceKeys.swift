@@ -16,15 +16,16 @@ public nonisolated struct RepositoryRootsKey: SharedKey {
     context _: LoadContext<[String]>,
     continuation: LoadContinuation<[String]>
   ) {
+    // Read without the publishing `withLock`; only take it when normalization
+    // actually changes the stored value (see RepositorySettingsKey.load for the
+    // re-render-loop rationale).
     @Shared(.settingsFile) var settingsFile: SettingsFile
-    let roots = $settingsFile.withLock { settings in
-      let normalized = RepositoryPathNormalizer.normalize(settings.repositoryRoots)
-      if normalized != settings.repositoryRoots {
-        settings.repositoryRoots = normalized
-      }
-      return normalized
+    let current = settingsFile.repositoryRoots
+    let normalized = RepositoryPathNormalizer.normalize(current)
+    if normalized != current {
+      $settingsFile.withLock { $0.repositoryRoots = normalized }
     }
-    continuation.resume(returning: roots)
+    continuation.resume(returning: normalized)
   }
 
   public func subscribe(
@@ -63,15 +64,15 @@ public nonisolated struct PinnedWorktreeIDsKey: SharedKey {
     context _: LoadContext<[String]>,
     continuation: LoadContinuation<[String]>
   ) {
+    // Read without the publishing `withLock`; only take it when normalization
+    // actually changes the stored value (see RepositorySettingsKey.load).
     @Shared(.settingsFile) var settingsFile: SettingsFile
-    let ids = $settingsFile.withLock { settings in
-      let normalized = RepositoryPathNormalizer.normalize(settings.pinnedWorktreeIDs)
-      if normalized != settings.pinnedWorktreeIDs {
-        settings.pinnedWorktreeIDs = normalized
-      }
-      return normalized
+    let current = settingsFile.pinnedWorktreeIDs
+    let normalized = RepositoryPathNormalizer.normalize(current)
+    if normalized != current {
+      $settingsFile.withLock { $0.pinnedWorktreeIDs = normalized }
     }
-    continuation.resume(returning: ids)
+    continuation.resume(returning: normalized)
   }
 
   public func subscribe(

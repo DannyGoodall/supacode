@@ -386,6 +386,7 @@ struct RepositoriesFeature {
     case worktreeInfoEvent(WorktreeInfoWatcherClient.Event)
     case worktreeNotificationReceived(Worktree.ID)
     case worktreeBranchNameLoaded(worktreeID: Worktree.ID, name: String)
+    case worktreeChangeIdLoaded(worktreeID: Worktree.ID, changeId: ChangeIdDisplay?)
     case worktreeLineChangesLoaded(worktreeID: Worktree.ID, added: Int, removed: Int)
     case refreshGithubIntegrationAvailability
     case githubIntegrationAvailabilityUpdated(Bool)
@@ -658,6 +659,7 @@ struct RepositoriesFeature {
         state.isRefreshingWorktrees = false
         let previousSelection = state.selectedWorktreeID
         let previousSelectedWorktree = state.worktree(for: previousSelection)
+        let previousRoots = Set(state.repositoryRoots.map(\.standardizedFileURL))
         _ = applyRepositories(
           repositories,
           roots: roots,
@@ -671,6 +673,19 @@ struct RepositoriesFeature {
           uniqueKeysWithValues: failures.map { ($0.rootID, $0.message) }
         )
         state.dropStaleFailedRepositorySelection()
+        // Adding a repository should open it — select the newly-added repo's
+        // main worktree so its default shell starts, consistent across git and
+        // jj backends (the terminal only renders for the selected worktree).
+        // Keyed off roots that weren't present before this add, so a plain
+        // refresh / reload doesn't hijack the user's current selection.
+        if let newRoot = roots.first(where: { !previousRoots.contains($0.standardizedFileURL) }),
+          let newRepository = state.repositories.first(where: {
+            $0.rootURL.standardizedFileURL == newRoot.standardizedFileURL
+          }),
+          let firstWorktreeID = state.firstAvailableWorktreeID(in: newRepository.id)
+        {
+          state.selection = .worktree(firstWorktreeID)
+        }
         if !invalidRoots.isEmpty {
           let message = invalidRoots.map { "Supacode couldn't read \($0)." }.joined(separator: "\n")
           state.alert = messageAlert(
@@ -947,7 +962,8 @@ struct RepositoriesFeature {
           selectedBaseRef: selectedBaseRef,
           fetchOrigin: promptSettingsFile.global.fetchOriginBeforeWorktreeCreation,
           defaultWorktreeBaseDirectory: defaultWorktreeBaseDirectory,
-          validationMessage: nil
+          validationMessage: nil,
+          isColocatedJJ: state.usesJujutsuBackend(forRepository: repository.id)
         )
         return .none
 
@@ -1960,18 +1976,24 @@ struct RepositoriesFeature {
           state.repositories[id: target.repositoryID]?.worktrees[id: target.worktreeID]?.isMissing
             == true
         }
-        let title = count == 1 ? "Delete worktree?" : "Delete \(count) worktrees?"
-        let buttonLabel = count == 1 ? "Delete worktree" : "Delete \(count) worktrees"
+        // Flavor-aware copy: jj when every target is a jj-backed repo.
+        let deleteVocab: WorktreeVocabulary =
+          validTargets.allSatisfy { state.usesJujutsuBackend(forRepository: $0.repositoryID) }
+          ? .jujutsu : .git
+        let wsNoun = deleteVocab.workspaceNoun.lowercased()
+        let bmNoun = deleteVocab.bookmarkNoun.lowercased()
+        let title = count == 1 ? "Delete \(wsNoun)?" : "Delete \(count) \(wsNoun)s?"
+        let buttonLabel = count == 1 ? "Delete \(wsNoun)" : "Delete \(count) \(wsNoun)s"
         let message: String =
           switch (count, deleteBranchOnDeleteWorktree, allMissing) {
-          case (1, _, true): "Removes the orphan worktree entry from this repository."
-          case (_, _, true): "Removes \(count) orphan worktree entries from this repository."
-          case (1, true, false): "This deletes the worktree directory and its local branch."
-          case (1, false, false): "This deletes the worktree directory but keeps the local branch."
+          case (1, _, true): "Removes the orphan \(wsNoun) entry from this repository."
+          case (_, _, true): "Removes \(count) orphan \(wsNoun) entries from this repository."
+          case (1, true, false): "This deletes the \(wsNoun) directory and its local \(bmNoun)."
+          case (1, false, false): "This deletes the \(wsNoun) directory but keeps the local \(bmNoun)."
           case (_, true, false):
-            "This deletes \(count) worktree directories and their local branches."
+            "This deletes \(count) \(wsNoun) directories and their local \(bmNoun)s."
           case (_, false, false):
-            "This deletes \(count) worktree directories but keeps their local branches."
+            "This deletes \(count) \(wsNoun) directories but keeps their local \(bmNoun)s."
           }
         state.alert = AlertState {
           TextState(title)
@@ -2727,9 +2749,10 @@ struct RepositoriesFeature {
         guard let worktree = state.worktree(for: worktreeID),
           worktree.isAttached, !worktree.name.isEmpty
         else {
+          let vocab = state.worktreeVocabulary(forWorktree: worktreeID)
           state.alert = messageAlert(
             title: "Unable to push",
-            message: "This worktree has no branch or bookmark to push."
+            message: "This \(vocab.workspaceNoun.lowercased()) has no \(vocab.bookmarkNoun.lowercased()) to push."
           )
           return .none
         }
@@ -2829,11 +2852,22 @@ struct RepositoriesFeature {
             return .none
           }
           let worktreeURL = worktree.workingDirectory
+          // For an anonymous jj `@` (no bookmark) fall back to the cached
+          // workspace name so the watcher clears a stale bookmark WITHOUT
+          // re-enumerating workspaces (the ~5s latency). `nil` for git.
+          let jjWorkspaceFallback = worktree.jjWorkspaceName
           let gitClient = gitClient
           return .run { send in
-            if let name = await gitClient.branchName(worktreeURL) {
+            // Kick off both watcher subprocesses concurrently — the branch
+            // label and the jj change-id come from independent `jj log` reads.
+            async let branchName = gitClient.branchName(worktreeURL)
+            async let changeId = gitClient.jjChangeId(worktreeURL)
+            if let name = await branchName ?? jjWorkspaceFallback {
               await send(.worktreeBranchNameLoaded(worktreeID: worktreeID, name: name))
             }
+            // Refresh the jj change-id chip in lockstep with the branch label
+            // (nil for git, so this is a no-op there).
+            await send(.worktreeChangeIdLoaded(worktreeID: worktreeID, changeId: await changeId))
           }
         case .filesChanged(let worktreeID):
           guard let worktree = state.worktree(for: worktreeID) else {
@@ -3014,6 +3048,15 @@ struct RepositoriesFeature {
       case .worktreeBranchNameLoaded(let worktreeID, let name):
         state.updateWorktreeName(worktreeID, name: name)
         Self.syncSidebar(&state)
+        return .none
+
+      case .worktreeChangeIdLoaded(let worktreeID, let changeId):
+        // Write through to the worktree model AND the row. The row update is the
+        // per-leaf chip refresh; the worktree update keeps `syncSidebar` (which
+        // copies `worktree.jjChangeId` onto the row) from reverting this fresh
+        // value to the stale enumeration-time change id on the next sync.
+        state.updateWorktreeChangeId(worktreeID, changeId: changeId)
+        state.sidebarItems[id: worktreeID]?.jjChangeId = changeId
         return .none
 
       case .worktreeLineChangesLoaded(let worktreeID, let added, let removed):
@@ -3569,7 +3612,8 @@ struct RepositoriesFeature {
           worktreeID: worktreeID,
           repositoryID: repositoryID,
           repositoryRootURL: repository.rootURL,
-          currentName: worktree.name
+          currentName: worktree.name,
+          isColocatedJJ: state.usesJujutsuBackend(forRepository: repositoryID)
         )
         return .none
 
@@ -4340,6 +4384,31 @@ extension RepositoriesFeature.State {
     return nil
   }
 
+  /// Whether the given repository's rows use the Jujutsu backend (and so should
+  /// present jj-native vocabulary). A root is only classified `.gitColocatedJJ`
+  /// when the experimental gate is on, so this just layers the per-repo
+  /// `preferJJ` override on top of the flavor — matching
+  /// `GitClientDependency.shouldUseJujutsuBackend(for:)`.
+  func usesJujutsuBackend(forRepository id: Repository.ID) -> Bool {
+    guard let repository = repositories[id: id], repository.vcs == .gitColocatedJJ else {
+      return false
+    }
+    @SharedReader(.repositorySettings(repository.rootURL)) var settings
+    return Repository.usesJujutsuBackend(vcs: repository.vcs, preferJJ: settings.preferJJ)
+  }
+
+  /// The flavor-aware label set for a repository's worktree rows.
+  func worktreeVocabulary(forRepository id: Repository.ID) -> WorktreeVocabulary {
+    usesJujutsuBackend(forRepository: id) ? .jujutsu : .git
+  }
+
+  /// The flavor-aware label set for the repository that contains the given
+  /// worktree (git vocabulary when the worktree/repo can't be resolved).
+  func worktreeVocabulary(forWorktree id: Worktree.ID?) -> WorktreeVocabulary {
+    guard let id, let repoID = repositoryID(containing: id) else { return .git }
+    return worktreeVocabulary(forRepository: repoID)
+  }
+
   /// Tint colors for scripts currently running in the given worktree,
   /// ordered deterministically by script ID. Snapshotted at run-time so a
   /// live color edit only takes effect on the next run; this also keeps
@@ -4887,6 +4956,37 @@ extension RepositoriesFeature.State {
         createdAt: worktree.createdAt,
         isMissing: worktree.isMissing,
         isAttached: worktree.isAttached,
+        jjChangeId: worktree.jjChangeId,
+        jjWorkspaceName: worktree.jjWorkspaceName,
+      )
+      repositories[index] = repository.replacingWorktrees(worktrees)
+      return
+    }
+  }
+
+  /// Write a freshly-watched jj change id through to the `Worktree` model (not
+  /// just the sidebar row). `syncSidebar` copies `worktree.jjChangeId` onto the
+  /// row, so without this a later sync would revert the watcher's fresh value
+  /// back to the stale enumeration-time change id (the "flashes new then snaps
+  /// back" bug). Mirrors `updateWorktreeName`'s write-through.
+  mutating func updateWorktreeChangeId(_ worktreeID: Worktree.ID, changeId: ChangeIdDisplay?) {
+    for index in repositories.indices {
+      let repository = repositories[index]
+      guard let worktreeIndex = repository.worktrees.index(id: worktreeID) else { continue }
+      let worktree = repository.worktrees[worktreeIndex]
+      guard worktree.jjChangeId != changeId else { return }
+      var worktrees = repository.worktrees
+      worktrees[id: worktreeID] = Worktree(
+        id: worktree.id,
+        name: worktree.name,
+        detail: worktree.detail,
+        workingDirectory: worktree.workingDirectory,
+        repositoryRootURL: worktree.repositoryRootURL,
+        createdAt: worktree.createdAt,
+        isMissing: worktree.isMissing,
+        isAttached: worktree.isAttached,
+        jjChangeId: changeId,
+        jjWorkspaceName: worktree.jjWorkspaceName,
       )
       repositories[index] = repository.replacingWorktrees(worktrees)
       return

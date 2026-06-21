@@ -415,6 +415,7 @@ extension RepositoriesFeature.Action {
       .requestDeleteRepository, .requestRemoveFailedRepository,
       .presentAlert,
       .pushWorktreeBookmark,
+      .worktreeChangeIdLoaded,
       .refreshGithubIntegrationAvailability,
       .githubIntegrationAvailabilityUpdated,
       .repositoryPullRequestRefreshCompleted,

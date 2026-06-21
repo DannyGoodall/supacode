@@ -10,19 +10,24 @@ struct CommandPaletteItem: Identifiable, Equatable {
   let subtitle: String?
   let kind: Kind
   let priorityTier: Int
+  /// Whether this item's repository uses the jj backend, so help text reads in
+  /// jj vocabulary. Set by the builder (which has `RepositoriesFeature.State`).
+  let isJJ: Bool
 
   init(
     id: String,
     title: String,
     subtitle: String?,
     kind: Kind,
-    priorityTier: Int = defaultPriorityTier
+    priorityTier: Int = defaultPriorityTier,
+    isJJ: Bool = false
   ) {
     self.id = id
     self.title = title
     self.subtitle = subtitle
     self.kind = kind
     self.priorityTier = priorityTier
+    self.isJJ = isJJ
   }
 
   enum Kind: Equatable {

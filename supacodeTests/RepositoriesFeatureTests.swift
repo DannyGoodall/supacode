@@ -5581,6 +5581,57 @@ struct RepositoriesFeatureTests {
     await store.receive(\.deleteSidebarItemConfirmed)
   }
 
+  @Test func openRepositoriesFinishedSelectsNewlyAddedRepo() async {
+    // An existing repo is already loaded (and present in repositoryRoots).
+    let existingRoot = "/tmp/existing"
+    let existing = makeRepository(
+      id: existingRoot,
+      worktrees: [makeWorktree(id: existingRoot, name: "main", repoRoot: existingRoot)]
+    )
+    let addedRoot = "/tmp/added"
+    let addedMain = makeWorktree(id: addedRoot, name: "main", repoRoot: addedRoot)
+    let added = makeRepository(id: addedRoot, worktrees: [addedMain])
+
+    var state = makeState(repositories: [existing])  // repositoryRoots == [existing]
+    state.reconcileSidebarForTesting()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .openRepositoriesFinished(
+        [existing, added],
+        failures: [],
+        invalidRoots: [],
+        roots: [existing.rootURL, added.rootURL]
+      )
+    )
+    // Adding a repository selects its main worktree so its default shell opens.
+    #expect(store.state.selectedWorktreeID == addedMain.id)
+    await store.receive(\.delegate.selectedWorktreeChanged)
+  }
+
+  @Test func worktreeChangeIdLoadedWritesThroughToWorktreeModel() async {
+    // Regression: the watcher's fresh change id must land on the Worktree model
+    // (not only the row), so a later syncSidebar can't revert it to the stale
+    // enumeration-time value (the "flashes new then snaps back" bug).
+    let root = "/tmp/repo"
+    let worktree = makeWorktree(id: root, name: "main", repoRoot: root)
+    let repository = makeRepository(id: root, worktrees: [worktree])
+    var state = makeState(repositories: [repository])
+    state.reconcileSidebarForTesting()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+    store.exhaustivity = .off
+
+    let changeId = ChangeIdDisplay(prefix: "zqo", rest: "mllmx")
+    await store.send(.worktreeChangeIdLoaded(worktreeID: worktree.id, changeId: changeId))
+    #expect(store.state.repositories[id: root]?.worktrees[id: worktree.id]?.jjChangeId == changeId)
+    #expect(store.state.sidebarItems[id: worktree.id]?.jjChangeId == changeId)
+  }
+
   // MARK: - Select Next/Previous Worktree
 
   @Test func selectNextWorktreeWrapsForward() async {

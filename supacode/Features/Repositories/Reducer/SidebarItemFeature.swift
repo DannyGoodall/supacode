@@ -50,6 +50,13 @@ struct SidebarItemFeature {
     var hasMergedBadge: Bool
     /// Mirror of `Worktree.isMissing`; drives the orphan row UI.
     var isMissing: Bool = false
+    /// Whether this row's repository uses the jj backend (co-located + the gate
+    /// + `preferJJ`); reconcile fans this in per repository. Drives jj-native
+    /// row affordances (the bird icon, change-id display).
+    var isColocatedJJ: Bool = false
+    /// jj change id of `@` (prefix + rest) for the row label; `nil` for git.
+    /// Seeded from the worktree at reconcile, refreshed live by the watcher.
+    var jjChangeId: ChangeIdDisplay?
     /// Mirror of `SidebarState.Item.title`; reconcile fans this in from
     /// `@Shared(.sidebar)`. `nil` or whitespace-only means fall back to `name`.
     var customTitle: String?
@@ -297,6 +304,11 @@ struct SelectedWorktreeSlice: Equatable, Sendable {
   let lifecycle: SidebarItemFeature.State.Lifecycle
   let pullRequest: GithubPullRequest?
   let runningScripts: IdentifiedArrayOf<SidebarItemFeature.State.RunningScript>
+  /// jj change id of `@` (prefix + rest); `nil` for git rows. Carried so the
+  /// toolbar title can mirror the sidebar's change-id chip, refreshed live by
+  /// the op-log watcher (`.worktreeChangeIdLoaded`). Updates only on real jj
+  /// operations, so it doesn't add a per-leaf storm to the detail body.
+  let jjChangeId: ChangeIdDisplay?
 
   init(_ row: SidebarItemFeature.State) {
     self.id = row.id
@@ -312,6 +324,7 @@ struct SelectedWorktreeSlice: Equatable, Sendable {
     self.lifecycle = row.lifecycle
     self.pullRequest = row.pullRequest
     self.runningScripts = row.runningScripts
+    self.jjChangeId = row.jjChangeId
   }
 
   var sidebarDisplayName: String? {

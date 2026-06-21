@@ -41,16 +41,19 @@ public nonisolated struct RepositorySettingsKey: SharedKey {
       )
     }
 
+    // Read WITHOUT `withLock` when the entry already exists: `withLock`
+    // republishes `settingsFile` to every observer unconditionally (even for a
+    // read), and views that observe `settingsFile` while the render path reads
+    // `@Shared(.repositorySettings(...))` would otherwise feed back into an
+    // infinite re-render loop. Only take the publishing lock to seed a default.
     @Shared(.settingsFile) var settingsFile: SettingsFile
-    let settings = $settingsFile.withLock { settings in
-      if let existing = settings.repositories[repositoryID] {
-        return existing
-      }
-      let defaults = context.initialValue ?? .default
-      settings.repositories[repositoryID] = defaults
-      return defaults
+    if let existing = settingsFile.repositories[repositoryID] {
+      continuation.resume(returning: existing)
+      return
     }
-    continuation.resume(returning: settings)
+    let defaults = context.initialValue ?? .default
+    $settingsFile.withLock { $0.repositories[repositoryID] = defaults }
+    continuation.resume(returning: defaults)
   }
 
   public func subscribe(

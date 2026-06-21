@@ -26,7 +26,14 @@ struct JJClient {
     let fileManager = FileManager.default
     var worktrees: [Worktree] = []
     for name in names {
-      guard let workspaceURL = await workspaceRootURL(named: name, repoRoot: repositoryRootURL) else {
+      // The `default` workspace is the colocated checkout at the repo root.
+      // Older `.jj` repos (created before jj recorded workspace paths) answer
+      // `jj workspace root --name default` with "no recorded path", so fall
+      // back to the repo root rather than dropping the row — otherwise the repo
+      // enumerates zero workspaces and can't be selected / opened.
+      let resolvedURL = await workspaceRootURL(named: name, repoRoot: repositoryRootURL)
+      guard let workspaceURL = resolvedURL ?? (name == Self.defaultWorkspaceName ? repositoryRootURL : nil)
+      else {
         continue
       }
       guard fileManager.fileExists(atPath: workspaceURL.path(percentEncoded: false)) else {
@@ -36,8 +43,8 @@ struct JJClient {
       // exists; otherwise fall back to the workspace name. An anonymous
       // workspace (no bookmark) is treated as not attached, mirroring a
       // detached-HEAD git worktree.
-      let bookmark = await bookmarkAtWorkspace(named: name, repoRoot: repositoryRootURL)
-      let isAttached = !bookmark.isEmpty
+      let head = await headInfo(named: name, repoRoot: repositoryRootURL)
+      let isAttached = !head.bookmark.isEmpty
       let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: workspaceURL)
       let id = workspaceURL.path(percentEncoded: false)
       let resourceValues = try? workspaceURL.resourceValues(forKeys: [
@@ -47,13 +54,15 @@ struct JJClient {
       worktrees.append(
         Worktree(
           id: id,
-          name: isAttached ? bookmark : name,
+          name: isAttached ? head.bookmark : name,
           detail: detail,
           workingDirectory: workspaceURL,
           repositoryRootURL: repositoryRootURL,
           createdAt: createdAt,
           isMissing: false,
-          isAttached: isAttached
+          isAttached: isAttached,
+          jjChangeId: head.changeId,
+          jjWorkspaceName: name
         )
       )
     }
@@ -74,20 +83,36 @@ struct JJClient {
       .filter { !$0.isEmpty }
   }
 
-  /// Bookmark name at the working-copy commit of workspace `name`, resolved
-  /// from the primary via the `<name>@` revset. Empty when the workspace is
-  /// anonymous; jj errors are swallowed to empty.
-  nonisolated private func bookmarkAtWorkspace(named name: String, repoRoot: URL) async -> String {
+  /// Bookmark + change id at the working-copy commit of workspace `name`,
+  /// resolved from the primary via the `<name>@` revset in a single `jj log`
+  /// call (no extra subprocess per workspace). Bookmark is empty when anonymous.
+  nonisolated private func headInfo(
+    named name: String,
+    repoRoot: URL
+  ) async -> (bookmark: String, changeId: ChangeIdDisplay?) {
     let output = try? await runJJ(
-      ["log", "--ignore-working-copy", "--no-graph", "-r", "\(name)@", "-T", Self.bookmarkTemplate],
+      ["log", "--ignore-working-copy", "--no-graph", "-r", "\(name)@", "-T", Self.headTemplate],
       cwd: repoRoot
     )
-    return Self.firstBookmark(from: output)
+    return Self.parseHead(output)
   }
 
-  /// Bookmark at `@` for the workspace rooted at `workspaceURL` (the jj
-  /// counterpart to `GitClient.branchName`). nil when there is no bookmark or
-  /// jj fails.
+  /// Change id of `@` for the workspace rooted at `workspaceURL` — the watcher
+  /// refreshes this live alongside `branchName`. Cheap single `jj log`; safe on
+  /// the (quiet) op-log watcher path.
+  nonisolated func changeId(forWorkspaceAt workspaceURL: URL) async -> ChangeIdDisplay? {
+    let output = try? await runJJ(
+      ["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", Self.headTemplate],
+      cwd: workspaceURL.standardizedFileURL
+    )
+    return Self.parseHead(output).changeId
+  }
+
+  /// Bookmark at `@` for the workspace (jj counterpart to `GitClient.branchName`).
+  /// `nil` when `@` is anonymous — the caller (the reducer's branch handler)
+  /// falls back to the cached `Worktree.jjWorkspaceName`, so we DON'T re-run the
+  /// expensive `jj workspace list` + per-workspace `root --name` enumeration on
+  /// every op (that was the ~5s anonymous-`@` latency). One cheap `jj log`.
   nonisolated func branchName(forWorkspaceAt workspaceURL: URL) async -> String? {
     let output = try? await runJJ(
       ["log", "--ignore-working-copy", "--no-graph", "-r", "@", "-T", Self.bookmarkTemplate],
@@ -111,8 +136,28 @@ struct JJClient {
     return WorktreeTextFormatting.parseShortstat(output)
   }
 
+  /// jj's primary/initial workspace name — the colocated checkout at the repo
+  /// root. Used as the fall-back path when an older `.jj` can't report it.
+  nonisolated private static let defaultWorkspaceName = "default"
+
   nonisolated private static let bookmarkTemplate =
     "local_bookmarks.map(|b| b.name()).join(\",\") ++ \"\\n\""
+
+  /// Tab-separated `change-id-prefix ⇥ change-id-rest ⇥ bookmarks` for a single
+  /// revision. `shortest(8)` mirrors jj's default log: `.prefix()` is the
+  /// shortest UNIQUE prefix (highlighted) and `.rest()` pads to 8 chars (dim).
+  /// Plain `shortest()` would leave `.rest()` empty (its "shortest" form is just
+  /// the unique prefix), which hid the dim remainder.
+  ///
+  /// Field order is load-bearing: `ShellClient` trims leading/trailing
+  /// whitespace off the whole stdout, so the change-id prefix — which is ALWAYS
+  /// non-empty — must lead. The bookmarks field is empty for an anonymous `@`;
+  /// putting it last means a trimmed trailing tab just drops the (empty) field
+  /// instead of shifting `prefix`/`rest` into the wrong slots (the bug where an
+  /// anonymous workspace rendered its change-id prefix as a bookmark name).
+  nonisolated private static let headTemplate =
+    "change_id.shortest(8).prefix() ++ \"\\t\" ++ change_id.shortest(8).rest() ++ \"\\t\""
+    + " ++ local_bookmarks.map(|b| b.name()).join(\",\") ++ \"\\n\""
 
   /// First bookmark from the comma-joined template output (empty when none).
   nonisolated private static func firstBookmark(from output: String?) -> String {
@@ -125,6 +170,30 @@ struct JJClient {
     return line.split(separator: ",").first.map(String.init) ?? line
   }
 
+  /// Parses `headTemplate` output into the first bookmark + the change id.
+  nonisolated private static func parseHead(
+    _ output: String?
+  ) -> (bookmark: String, changeId: ChangeIdDisplay?) {
+    guard
+      let line = output?.split(whereSeparator: \.isNewline)
+        .map(String.init)
+        .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+    else {
+      return ("", nil)
+    }
+    // Field order matches `headTemplate`: prefix ⇥ rest ⇥ bookmarks. The prefix
+    // is always present (every commit has a change id); rest and bookmarks may
+    // be empty/absent after the shell trims trailing whitespace.
+    let fields = line.components(separatedBy: "\t")
+    let prefix = fields.first?.trimmingCharacters(in: .whitespaces) ?? ""
+    let rest = fields.count > 1 ? fields[1].trimmingCharacters(in: .whitespaces) : ""
+    let bookmarks = fields.count > 2 ? fields[2] : ""
+    let bookmark =
+      bookmarks.split(separator: ",").first.map(String.init)?
+      .trimmingCharacters(in: .whitespaces) ?? ""
+    let changeId = (prefix + rest).isEmpty ? nil : ChangeIdDisplay(prefix: prefix, rest: rest)
+    return (bookmark, changeId)
+  }
   // MARK: - Create
 
   /// Streaming create matching `GitClient.createWorktreeStream`'s event shape.
@@ -207,7 +276,8 @@ struct JJClient {
       repositoryRootURL: repositoryRootURL,
       createdAt: createdAt,
       isMissing: false,
-      isAttached: true
+      isAttached: true,
+      jjWorkspaceName: name
     )
   }
 
@@ -303,11 +373,12 @@ struct JJClient {
   }
 
   /// Pushes a bookmark to its remote for pull-request prep
-  /// (`jj git push --bookmark <name> --allow-new`). `--allow-new` lets the
-  /// first push of a not-yet-remote bookmark create the remote branch; jj's
-  /// own force-with-lease-style safety checks still apply.
+  /// (`jj git push --bookmark <name>`). jj creates a not-yet-remote bookmark by
+  /// default and applies force-with-lease-style safety checks on updates.
   nonisolated func pushBookmark(named name: String, remote: String?, repoRoot: URL) async throws {
-    var arguments = ["git", "push", "--bookmark", name, "--allow-new"]
+    // jj 0.42 has no `--allow-new` flag (it rejects it, suggesting `--all`) and
+    // creates a not-yet-remote bookmark by default, so we must NOT pass it.
+    var arguments = ["git", "push", "--bookmark", name]
     if let remote, !remote.trimmingCharacters(in: .whitespaces).isEmpty {
       arguments += ["--remote", remote]
     }

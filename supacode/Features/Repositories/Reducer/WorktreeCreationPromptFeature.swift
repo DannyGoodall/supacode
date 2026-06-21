@@ -39,6 +39,12 @@ struct WorktreeCreationPromptFeature {
     /// section; transferred to `PendingWorktree.customization` on submit.
     var title: String = ""
     var color: RepositoryColor?
+    /// Whether this repository uses the jj backend, so the prompt reads in
+    /// workspace/bookmark vocabulary (set at creation from the parent reducer).
+    var isColocatedJJ: Bool = false
+
+    /// Flavor-aware labels for the prompt.
+    var vocab: WorktreeVocabulary { WorktreeVocabulary(isJJ: isColocatedJJ) }
 
     /// Default leaf folder name shown as the name-override placeholder.
     var worktreeNamePlaceholder: String {

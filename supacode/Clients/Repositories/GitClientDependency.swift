@@ -53,6 +53,8 @@ struct GitClientDependency: Sendable {
   var removeWorktree: @Sendable (_ worktree: Worktree, _ deleteBranch: Bool) async throws -> URL
   var isBareRepository: @Sendable (_ repoRoot: URL) async throws -> Bool
   var branchName: @Sendable (URL) async -> String?
+  /// jj change id of `@` for the working copy (prefix + rest), `nil` for git.
+  var jjChangeId: @Sendable (_ worktreeURL: URL) async -> ChangeIdDisplay?
   var lineChanges: @Sendable (URL) async -> (added: Int, removed: Int)?
   var remoteNames: @Sendable (_ repoRoot: URL) async throws -> [String]
   var fetchRemote: @Sendable (_ remote: String, _ repoRoot: URL) async throws -> Void
@@ -161,6 +163,10 @@ extension GitClientDependency: DependencyKey {
         return await JJClient().branchName(forWorkspaceAt: url)
       }
       return await GitClient().branchName(for: url)
+    },
+    jjChangeId: { url in
+      guard GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) else { return nil }
+      return await JJClient().changeId(forWorkspaceAt: url)
     },
     lineChanges: { url in
       if GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) {
