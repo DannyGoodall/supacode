@@ -250,7 +250,13 @@ let project = Project(
           // release app (also `app.supabit.supacode`). Paired with the
           // separate `~/.supacode-debug` data dir in SupacodePaths.
           "PRODUCT_BUNDLE_IDENTIFIER": "app.supabit.supacode.debug",
-          "SUPACODE_DISPLAY_NAME": "Supacode (Debug)",
+          // jj-fork build identity: distinct Dock/menu/About name, and a
+          // SemVer build-metadata tag appended to CFBundleShortVersionString
+          // (e.g. 0.10.4+jj) so the fork is unmistakable vs an upstream
+          // install. MARKETING_VERSION itself stays semver-clean. See
+          // openspec/changes/add-jj-colocation-support/UPSTREAM-RECONCILIATION.md §5a.
+          "SUPACODE_DISPLAY_NAME": "Supacode JJ",
+          "SUPACODE_VERSION_SUFFIX": "+jj",
         ],
         release: [
           "CODE_SIGN_ENTITLEMENTS": "supacode/supacode.entitlements",
