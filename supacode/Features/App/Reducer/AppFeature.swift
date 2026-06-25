@@ -277,7 +277,7 @@ struct AppFeature {
         state.repositories.$sidebar.withLock { sidebar in
           sidebar.focusedWorktreeID = lastFocusedWorktreeID
         }
-        @Shared(.repositorySettings(rootURL)) var repositorySettings
+        @Shared(.repositorySettings(rootURL, host: worktree.host)) var repositorySettings
         let settings = repositorySettings
         return .merge(
           .run { _ in
@@ -324,23 +324,36 @@ struct AppFeature {
               .repositoriesChanged(
                 repositories.map {
                   SettingsRepositorySummary(
-                    id: $0.id,
+                    id: $0.id.rawValue,
                     name: $0.name,
                     isGitRepository: $0.isGitRepository,
-                    isColocatedJJ: $0.isColocatedJJ
+                    isColocatedJJ: $0.isColocatedJJ,
+                    host: $0.host,
+                    rootURL: $0.rootURL
                   )
                 }
               )
             )
           ),
           .send(.commandPalette(.pruneRecency(recencyIDs))),
-          .run { [allowed] _ in
-            await terminalClient.send(.prune(allowed))
-          },
           .run { _ in
             await worktreeInfoWatcher.send(.setWorktrees(worktrees))
           },
         ])
+        // Don't prune terminal state while remote repos are still resolving:
+        // their placeholders have no rows yet, so pruning would delete restored
+        // remote layouts and kill their zmx sessions before resolution lands.
+        if state.repositories.resolvingRemoteRepositoryIDs.isEmpty {
+          // Failed/loading repos have no worktree rows yet, so shield their restored zmx sessions from prune.
+          let protectedRepositoryIDs = Set(state.repositories.loadFailuresByID.keys)
+          effects.append(
+            .run { [allowed, protectedRepositoryIDs] _ in
+              await terminalClient.send(
+                .prune(keeping: allowed, protectingRepositoryIDs: protectedRepositoryIDs)
+              )
+            }
+          )
+        }
         // Drain layout-seeded surfaces (including any that piled up from prior
         // reconciles before this delegate fired) so restored presence records
         // light up rows born on this tick.
@@ -375,7 +388,7 @@ struct AppFeature {
         // the scripts page which is the only settings surface that
         // applies to them.
         let section: SettingsSection =
-          repository.isGitRepository ? .repository(repositoryID) : .repositoryScripts(repositoryID)
+          repository.isGitRepository ? .repository(repositoryID.rawValue) : .repositoryScripts(repositoryID.rawValue)
         return .send(.settings(.setSelection(section)))
 
       case .repositories(.delegate(.runBlockingScript(let worktree, _, let kind, let script))):
@@ -406,7 +419,7 @@ struct AppFeature {
         state.globalScripts = settings.globalScripts
         if let selectedWorktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID) {
           let rootURL = selectedWorktree.repositoryRootURL
-          @Shared(.repositorySettings(rootURL)) var repositorySettings
+          @Shared(.repositorySettings(rootURL, host: selectedWorktree.host)) var repositorySettings
           state.openActionSelection = OpenWorktreeAction.fromSettingsID(
             repositorySettings.openActionID,
             defaultEditorID: settings.defaultEditorID
@@ -478,7 +491,7 @@ struct AppFeature {
         }
         let rootURL = worktree.repositoryRootURL
         let actionID = action.settingsID
-        @Shared(.repositorySettings(rootURL)) var repositorySettings
+        @Shared(.repositorySettings(rootURL, host: worktree.host)) var repositorySettings
         $repositorySettings.withLock { $0.openActionID = actionID }
         return .none
 
@@ -620,7 +633,9 @@ struct AppFeature {
           if state.repoScripts.isEmpty, !state.globalScripts.isEmpty {
             return .send(.settings(.setSelection(.scripts)))
           }
-          let repositoryID = worktree.repositoryRootURL.path(percentEncoded: false)
+          let repositoryID =
+            state.repositories.repositoryID(containing: worktree.id)?.rawValue
+            ?? worktree.repositoryRootURL.path(percentEncoded: false)
           return .send(.settings(.setSelection(.repositoryScripts(repositoryID))))
         }
         return .send(.runNamedScript(definition))
@@ -645,7 +660,9 @@ struct AppFeature {
           if isGlobal {
             return .send(.settings(.setSelection(.scripts)))
           }
-          let repositoryID = worktree.repositoryRootURL.path(percentEncoded: false)
+          let repositoryID =
+            state.repositories.repositoryID(containing: worktree.id)?.rawValue
+            ?? worktree.repositoryRootURL.path(percentEncoded: false)
           return .send(.settings(.setSelection(.repositoryScripts(repositoryID))))
         }
         analyticsClient.capture("script_run", ["kind": definition.kind.rawValue])
@@ -743,14 +760,15 @@ struct AppFeature {
           await terminalClient.send(.endSearch(worktree))
         }
 
-      case .settings(.repositorySettings(.delegate(.settingsChanged(let rootURL)))):
+      case .settings(.repositorySettings(.delegate(.settingsChanged(let rootURL, let host)))):
         guard let selectedWorktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID),
-          selectedWorktree.repositoryRootURL == rootURL
+          selectedWorktree.repositoryRootURL == rootURL,
+          selectedWorktree.host == host
         else {
           return .none
         }
         let worktreeID = selectedWorktree.id
-        @Shared(.repositorySettings(rootURL)) var repositorySettings
+        @Shared(.repositorySettings(rootURL, host: host)) var repositorySettings
         return .send(.worktreeSettingsLoaded(repositorySettings, worktreeID: worktreeID))
 
       case .worktreeSettingsLoaded(let settings, let worktreeID):
@@ -907,6 +925,9 @@ struct AppFeature {
 
       case .commandPalette(.delegate(.openRepository)):
         return .send(.repositories(.setOpenPanelPresented(true)))
+
+      case .commandPalette(.delegate(.addRemoteRepository)):
+        return .send(.repositories(.requestAddRemoteRepository))
 
       case .commandPalette(.delegate(.removeWorktree(let worktreeID, let repositoryID))):
         return .send(
@@ -1241,6 +1262,13 @@ struct AppFeature {
       appLogger.info("Ignoring open of missing worktree \(worktree.id) from \(source.rawValue)")
       return .none
     }
+    // Open / Reveal target local Finder / editors; a remote SSH path can't be
+    // reached, so reject it here regardless of the entry point (UI gates this
+    // too, but a hotkey can still reach the reducer).
+    if worktree.host != nil {
+      appLogger.info("Ignoring open of remote worktree \(worktree.id) from \(source.rawValue)")
+      return .none
+    }
     analyticsClient.capture("worktree_opened", ["action": action.settingsID, "source": source.rawValue])
     guard action == .editor else {
       return .run { send in
@@ -1344,7 +1372,7 @@ struct AppFeature {
       // Folders have no general settings pane — send them to the
       // scripts page (the only settings surface that applies).
       let section: SettingsSection =
-        repository.isGitRepository ? .repository(repositoryID) : .repositoryScripts(repositoryID)
+        repository.isGitRepository ? .repository(repositoryID.rawValue) : .repositoryScripts(repositoryID.rawValue)
       return .send(.settings(.setSelection(section)))
     case .settingsRepoScripts(let repositoryID):
       guard state.repositories.repositories[id: repositoryID] != nil else {
@@ -1352,7 +1380,7 @@ struct AppFeature {
         state.alert = repositoryNotFoundAlert()
         return .none
       }
-      return .send(.settings(.setSelection(.repositoryScripts(repositoryID))))
+      return .send(.settings(.setSelection(.repositoryScripts(repositoryID.rawValue))))
     }
   }
 
@@ -1709,7 +1737,7 @@ struct AppFeature {
   /// Resolves a script by ID across the worktree's repo scripts and the user's globals.
   /// Repo entries win when both buckets carry the same ID.
   private func resolveScript(scriptID: UUID, in worktree: Worktree) -> ScriptDefinition? {
-    @SharedReader(.repositorySettings(worktree.repositoryRootURL)) var repositorySettings
+    @SharedReader(.repositorySettings(worktree.repositoryRootURL, host: worktree.host)) var repositorySettings
     @SharedReader(.settingsFile) var settingsFile
     let merged: [ScriptDefinition] = .merged(
       repo: repositorySettings.scripts,
@@ -1800,7 +1828,7 @@ struct AppFeature {
       // reasonable default disposition for folders.
       return .send(.repositories(.requestDeleteSidebarItems([target])))
     }
-    let worktreeName = state.repositories.worktree(for: worktreeID)?.name ?? worktreeID
+    let worktreeName = state.repositories.worktree(for: worktreeID)?.name ?? worktreeID.rawValue
     guard bypassConfirmation else {
       return presentDeeplinkConfirmation(
         worktreeID: worktreeID,
@@ -2065,7 +2093,7 @@ struct AppFeature {
     state: State
   ) -> Worktree.ID {
     guard state.repositories.worktree(for: rawID) == nil else { return rawID }
-    let alternate = rawID + "/"
+    let alternate = WorktreeID(rawID.rawValue + "/")
     guard state.repositories.worktree(for: alternate) != nil else { return rawID }
     return alternate
   }
@@ -2096,7 +2124,7 @@ struct AppFeature {
   private func surfaceDeeplinkURL(worktreeID: Worktree.ID, surfaceID: UUID) -> URL? {
     let percentEncodingSet = CharacterSet.urlPathAllowed.subtracting(.init(charactersIn: "/"))
     let encodedWorktreeID =
-      worktreeID.addingPercentEncoding(withAllowedCharacters: percentEncodingSet) ?? worktreeID
+      worktreeID.rawValue.addingPercentEncoding(withAllowedCharacters: percentEncodingSet) ?? worktreeID.rawValue
     guard let tabID = terminalClient.tabID(worktreeID, surfaceID) else {
       notificationsLogger.debug(
         "Surface \(surfaceID) is no longer attached to a tab in \(worktreeID); "

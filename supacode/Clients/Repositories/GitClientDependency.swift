@@ -6,8 +6,8 @@ struct GitClientDependency: Sendable {
   var repoRoot: @Sendable (URL) async throws -> URL
   var isGitRepository: @Sendable (URL) async -> Bool
   /// Whether the root is a git repository with a colocated Jujutsu repo
-  /// (`.jj` peer of `.git`). Pure detection — the loader only promotes a
-  /// root to `.gitColocatedJJ` when the experimental setting is on.
+  /// (`.jj` peer of `.git`). Pure detection — the loader only sets
+  /// `isColocatedJJ` on a repo when the experimental setting is on.
   /// Routed through the dependency (like `isGitRepository`) so tests can
   /// override it without touching the filesystem.
   var isColocatedJJRepository: @Sendable (URL) async -> Bool
@@ -65,137 +65,155 @@ struct GitClientDependency: Sendable {
 }
 
 extension GitClientDependency: DependencyKey {
-  static let liveValue = GitClientDependency(
-    repoRoot: { try await GitClient().repoRoot(for: $0) },
-    isGitRepository: { Repository.isGitRepository(at: $0) },
-    isColocatedJJRepository: { Repository.isColocatedJJRepository(at: $0) },
-    rootDirectoryExists: { url in
-      var isDirectory: ObjCBool = false
-      let exists = FileManager.default.fileExists(
-        atPath: url.standardizedFileURL.path(percentEncoded: false),
-        isDirectory: &isDirectory
-      )
-      return exists && isDirectory.boolValue
-    },
-    worktrees: { root in
-      // Route co-located repos that prefer jj to the Jujutsu backend; on any
-      // jj failure (CLI missing/errored) degrade gracefully to Git so a
-      // colocated repo never fails to load.
-      if GitClientDependency.shouldUseJujutsuBackend(for: root) {
-        do {
-          return try await JJClient().workspaces(for: root)
-        } catch {
-          return try await GitClient().worktrees(for: root)
-        }
-      }
-      return try await GitClient().worktrees(for: root)
-    },
-    reconcileSupacodeLocks: { await GitClient().reconcileSupacodeLocks(for: $0) },
-    localBranchNames: { root in
-      if GitClientDependency.shouldUseJujutsuBackend(for: root) {
-        return try await JJClient().bookmarkNames(for: root)
-      }
-      return try await GitClient().localBranchNames(for: root)
-    },
-    renameBranch: { oldName, newName, repoRoot in
-      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
-        return try await JJClient().renameBookmark(from: oldName, to: newName, repoRoot: repoRoot)
-      }
-      try await GitClient().renameBranch(from: oldName, to: newName, for: repoRoot)
-    },
-    isValidBranchName: { branchName, repoRoot in
-      await GitClient().isValidBranchName(branchName, for: repoRoot)
-    },
-    branchInventory: { try await GitClient().branchInventory(for: $0, remoteNames: $1) },
-    defaultRemoteBranchRef: { try await GitClient().defaultRemoteBranchRef(for: $0) },
-    automaticWorktreeBaseRef: { await GitClient().automaticWorktreeBaseRef(for: $0) },
-    ignoredFileCount: { try await GitClient().ignoredFileCount(for: $0) },
-    untrackedFileCount: { try await GitClient().untrackedFileCount(for: $0) },
-    createWorktree: { name, repoRoot, baseDirectory, copyIgnored, copyUntracked, baseRef in
-      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
-        // jj auto-snapshots; the copy-ignored/untracked flags don't apply.
-        return try await JJClient().createWorkspace(
-          named: name,
-          in: repoRoot,
-          baseDirectory: baseDirectory,
-          baseRef: baseRef,
-          directoryOverride: nil
+  static let liveValue = make(shell: .live, jjRouting: true)
+
+  /// Remote flavor: every `git` / `wt` shell-out runs on `host` over SSH.
+  /// `isGitRepository` / `rootDirectoryExists` still probe the *local*
+  /// filesystem, which is unreachable for remote paths, so these stay local-only
+  /// probes the remote load path never relies on. jj is local-only, so the SSH
+  /// flavor never routes to `JJClient` (`jjRouting: false`).
+  static func ssh(host: RemoteHost) -> GitClientDependency {
+    make(shell: .ssh(host: host), jjRouting: false)
+  }
+
+  /// Single source of truth for the dependency's closures, parameterized on the
+  /// transport so the local and SSH flavors can't drift. `jjRouting` is `true`
+  /// only for the local flavor: when set, co-located git+jj roots that prefer jj
+  /// route to `JJClient`; when `false` (SSH), every closure is byte-for-byte the
+  /// Git path. See UPSTREAM-RECONCILIATION.md §4.2.
+  private static func make(shell: ShellClient, jjRouting: Bool) -> GitClientDependency {
+    GitClientDependency(
+      repoRoot: { try await GitClient(shell: shell).repoRoot(for: $0) },
+      isGitRepository: { Repository.isGitRepository(at: $0) },
+      isColocatedJJRepository: { jjRouting && Repository.isColocatedJJRepository(at: $0) },
+      rootDirectoryExists: { url in
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(
+          atPath: url.standardizedFileURL.path(percentEncoded: false),
+          isDirectory: &isDirectory
         )
-      }
-      return try await GitClient().createWorktree(
-        named: name,
-        in: repoRoot,
-        baseDirectory: baseDirectory,
-        copyFiles: (ignored: copyIgnored, untracked: copyUntracked),
-        baseRef: baseRef
-      )
-    },
-    createWorktreeStream: { name, repoRoot, baseDirectory, copyIgnored, copyUntracked, baseRef, directoryOverride in
-      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
-        return JJClient().createWorkspaceStream(
+        return exists && isDirectory.boolValue
+      },
+      worktrees: { root in
+        // Route co-located repos that prefer jj to the Jujutsu backend; on any
+        // jj failure (CLI missing/errored) degrade gracefully to Git so a
+        // colocated repo never fails to load.
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: root) {
+          do {
+            return try await JJClient().workspaces(for: root)
+          } catch {
+            return try await GitClient(shell: shell).worktrees(for: root)
+          }
+        }
+        return try await GitClient(shell: shell).worktrees(for: root)
+      },
+      reconcileSupacodeLocks: { await GitClient(shell: shell).reconcileSupacodeLocks(for: $0) },
+      localBranchNames: { root in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: root) {
+          return try await JJClient().bookmarkNames(for: root)
+        }
+        return try await GitClient(shell: shell).localBranchNames(for: root)
+      },
+      renameBranch: { oldName, newName, repoRoot in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+          return try await JJClient().renameBookmark(from: oldName, to: newName, repoRoot: repoRoot)
+        }
+        try await GitClient(shell: shell).renameBranch(from: oldName, to: newName, for: repoRoot)
+      },
+      isValidBranchName: { branchName, repoRoot in
+        await GitClient(shell: shell).isValidBranchName(branchName, for: repoRoot)
+      },
+      branchInventory: { try await GitClient(shell: shell).branchInventory(for: $0, remoteNames: $1) },
+      defaultRemoteBranchRef: { try await GitClient(shell: shell).defaultRemoteBranchRef(for: $0) },
+      automaticWorktreeBaseRef: { await GitClient(shell: shell).automaticWorktreeBaseRef(for: $0) },
+      ignoredFileCount: { try await GitClient(shell: shell).ignoredFileCount(for: $0) },
+      untrackedFileCount: { try await GitClient(shell: shell).untrackedFileCount(for: $0) },
+      createWorktree: { name, repoRoot, baseDirectory, copyIgnored, copyUntracked, baseRef in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+          // jj auto-snapshots; the copy-ignored/untracked flags don't apply.
+          return try await JJClient().createWorkspace(
+            named: name,
+            in: repoRoot,
+            baseDirectory: baseDirectory,
+            baseRef: baseRef,
+            directoryOverride: nil
+          )
+        }
+        return try await GitClient(shell: shell).createWorktree(
           named: name,
           in: repoRoot,
           baseDirectory: baseDirectory,
+          copyFiles: (ignored: copyIgnored, untracked: copyUntracked),
+          baseRef: baseRef
+        )
+      },
+      createWorktreeStream: { name, repoRoot, baseDirectory, copyIgnored, copyUntracked, baseRef, directoryOverride in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+          return JJClient().createWorkspaceStream(
+            named: name,
+            in: repoRoot,
+            baseDirectory: baseDirectory,
+            baseRef: baseRef,
+            directoryOverride: directoryOverride
+          )
+        }
+        return GitClient(shell: shell).createWorktreeStream(
+          named: name,
+          in: repoRoot,
+          baseDirectory: baseDirectory,
+          copyFiles: (ignored: copyIgnored, untracked: copyUntracked),
           baseRef: baseRef,
           directoryOverride: directoryOverride
         )
+      },
+      removeWorktree: { worktree, deleteBranch in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: worktree.repositoryRootURL) {
+          return try await JJClient().removeWorkspace(worktree, deleteBookmark: deleteBranch)
+        }
+        return try await GitClient(shell: shell).removeWorktree(worktree, deleteBranch: deleteBranch)
+      },
+      isBareRepository: { repoRoot in
+        try await GitClient(shell: shell).isBareRepository(for: repoRoot)
+      },
+      branchName: { url in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) {
+          return await JJClient().branchName(forWorkspaceAt: url)
+        }
+        return await GitClient(shell: shell).symbolicHeadBranch(at: url)
+      },
+      jjChangeId: { url in
+        guard jjRouting, GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) else { return nil }
+        return await JJClient().changeId(forWorkspaceAt: url)
+      },
+      lineChanges: { url in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) {
+          return await JJClient().lineChanges(at: url)
+        }
+        return await GitClient(shell: shell).lineChanges(at: url)
+      },
+      remoteNames: { root in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: root) {
+          return try await JJClient().remoteNames(for: root)
+        }
+        return try await GitClient(shell: shell).remoteNames(for: root)
+      },
+      fetchRemote: { remote, repoRoot in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+          return try await JJClient().fetch(remote: remote, repoRoot: repoRoot)
+        }
+        try await GitClient(shell: shell).fetchRemote(remote, for: repoRoot)
+      },
+      pushBranch: { name, repoRoot in
+        if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
+          return try await JJClient().pushBookmark(named: name, remote: nil, repoRoot: repoRoot)
+        }
+        try await GitClient(shell: shell).pushBranch(name, for: repoRoot)
+      },
+      remoteInfo: { repositoryRoot in
+        await GitClient(shell: shell).remoteInfo(for: repositoryRoot)
       }
-      return GitClient().createWorktreeStream(
-        named: name,
-        in: repoRoot,
-        baseDirectory: baseDirectory,
-        copyFiles: (ignored: copyIgnored, untracked: copyUntracked),
-        baseRef: baseRef,
-        directoryOverride: directoryOverride
-      )
-    },
-    removeWorktree: { worktree, deleteBranch in
-      if GitClientDependency.shouldUseJujutsuBackend(for: worktree.repositoryRootURL) {
-        return try await JJClient().removeWorkspace(worktree, deleteBookmark: deleteBranch)
-      }
-      return try await GitClient().removeWorktree(worktree, deleteBranch: deleteBranch)
-    },
-    isBareRepository: { repoRoot in
-      try await GitClient().isBareRepository(for: repoRoot)
-    },
-    branchName: { url in
-      if GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) {
-        return await JJClient().branchName(forWorkspaceAt: url)
-      }
-      return await GitClient().branchName(for: url)
-    },
-    jjChangeId: { url in
-      guard GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) else { return nil }
-      return await JJClient().changeId(forWorkspaceAt: url)
-    },
-    lineChanges: { url in
-      if GitClientDependency.shouldUseJujutsuBackendForWorkingCopy(at: url) {
-        return await JJClient().lineChanges(at: url)
-      }
-      return await GitClient().lineChanges(at: url)
-    },
-    remoteNames: { root in
-      if GitClientDependency.shouldUseJujutsuBackend(for: root) {
-        return try await JJClient().remoteNames(for: root)
-      }
-      return try await GitClient().remoteNames(for: root)
-    },
-    fetchRemote: { remote, repoRoot in
-      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
-        return try await JJClient().fetch(remote: remote, repoRoot: repoRoot)
-      }
-      try await GitClient().fetchRemote(remote, for: repoRoot)
-    },
-    pushBranch: { name, repoRoot in
-      if GitClientDependency.shouldUseJujutsuBackend(for: repoRoot) {
-        return try await JJClient().pushBookmark(named: name, remote: nil, repoRoot: repoRoot)
-      }
-      try await GitClient().pushBranch(name, for: repoRoot)
-    },
-    remoteInfo: { repositoryRoot in
-      await GitClient().remoteInfo(for: repositoryRoot)
-    }
-  )
+    )
+  }
   // Tests default to "git repository" classification so existing
   // fixtures that mock `gitClient.worktrees` without creating real
   // `.git` directories on disk keep exercising the git code path.
@@ -224,7 +242,7 @@ extension GitClientDependency {
     guard experimentalJJIntegration else { return false }
     guard Repository.isColocatedJJRepository(at: root) else { return false }
     @Shared(.repositorySettings(root)) var repositorySettings
-    return Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: repositorySettings.preferJJ)
+    return Repository.usesJujutsuBackend(isColocatedJJ: true, preferJJ: repositorySettings.preferJJ)
   }
 
   /// Working-copy-level variant for ops keyed by a worktree/workspace path
@@ -239,7 +257,7 @@ extension GitClientDependency {
     // definition. Honor the per-repo preferJJ override.
     if Repository.isColocatedJJRepository(at: base) {
       @Shared(.repositorySettings(base)) var repositorySettings
-      return Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: repositorySettings.preferJJ)
+      return Repository.usesJujutsuBackend(isColocatedJJ: true, preferJJ: repositorySettings.preferJJ)
     }
     // Secondary jj-only workspace (a `.jj` directory with no sibling `.git`):
     // gate on + `.jj` present → jj.

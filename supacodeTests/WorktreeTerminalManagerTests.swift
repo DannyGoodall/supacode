@@ -518,6 +518,38 @@ struct WorktreeTerminalManagerTests {
     #expect(manager.hasUnseenNotifications(for: worktree.id) == false)
   }
 
+  @Test func dismissAllNotificationsRefreshesRowWhenAllAlreadyRead() {
+    // Repro of the stuck-toolbar-bell bug: dismissing already-read notifications
+    // flips no unseen flag, so the gated indicator emit used to skip the row
+    // projection refresh and the bell stayed showing them. Dismiss must signal
+    // unconditionally so the sidebar row's `notifications` array (which the bell
+    // group-existence check reads) clears.
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+    state.setNotificationsForTesting([makeNotification(isRead: true), makeNotification(isRead: true)])
+    var indicatorEmits = 0
+    state.onNotificationIndicatorChanged = { indicatorEmits += 1 }
+
+    state.dismissAllNotifications()
+
+    #expect(state.notifications.isEmpty)
+    #expect(indicatorEmits == 1)
+  }
+
+  @Test func dismissReadNotificationRefreshesRow() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let state = manager.state(for: makeWorktree())
+    let read = makeNotification(isRead: true)
+    state.setNotificationsForTesting([read])
+    var indicatorEmits = 0
+    state.onNotificationIndicatorChanged = { indicatorEmits += 1 }
+
+    state.dismissNotification(read.id)
+
+    #expect(state.notifications.isEmpty)
+    #expect(indicatorEmits == 1)
+  }
+
   // MARK: - Per-surface unseen flag
 
   @Test func setNotificationsForTestingHydratesPerSurfaceFlag() {
@@ -682,6 +714,417 @@ struct WorktreeTerminalManagerTests {
     state.closeTab(tabId)
 
     #expect(state.surfaceStates[surfaceID] == nil)
+  }
+
+  @Test func closeAllSurfacesClearsPerSurfaceBookkeeping() {
+    withDependencies {
+      $0.date.now = Date(timeIntervalSince1970: 1_234)
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+      let worktree = makeWorktree()
+      let state = manager.state(for: worktree)
+      guard let tabId = state.createTab(focusing: false),
+        let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+      else {
+        Issue.record("Expected a tab and surface")
+        return
+      }
+      let surfaceID = surface.id
+      state.appendHookNotification(title: "done", body: "exit 0", surfaceID: surfaceID)
+      #expect(state.surfaceStates[surfaceID] != nil)
+      #expect(state.debugCustomNotificationTimestampCount == 1)
+
+      state.closeAllSurfaces()
+
+      #expect(state.allSurfaceIDs.isEmpty)
+      #expect(state.surfaceStates[surfaceID] == nil)
+      #expect(state.debugCustomNotificationTimestampCount == 0)
+    }
+  }
+
+  @Test func pruneKeepsStatesAndSessionsOwnedByProtectedRepositoryIDs() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let activeWorktree = Worktree(
+      id: WorktreeID("/tmp/active-repo/wt-1"),
+      name: "wt-1",
+      detail: "",
+      workingDirectory: URL(fileURLWithPath: "/tmp/active-repo/wt-1"),
+      repositoryRootURL: URL(fileURLWithPath: "/tmp/active-repo"),
+    )
+    let failedRepoWorktree = Worktree(
+      id: WorktreeID("/tmp/failed-repo/wt-1"),
+      name: "wt-1",
+      detail: "",
+      workingDirectory: URL(fileURLWithPath: "/tmp/failed-repo/wt-1"),
+      repositoryRootURL: URL(fileURLWithPath: "/tmp/failed-repo"),
+    )
+    let removedWorktree = Worktree(
+      id: WorktreeID("/tmp/removed-repo/wt-1"),
+      name: "wt-1",
+      detail: "",
+      workingDirectory: URL(fileURLWithPath: "/tmp/removed-repo/wt-1"),
+      repositoryRootURL: URL(fileURLWithPath: "/tmp/removed-repo"),
+    )
+    _ = manager.state(for: activeWorktree).createTab()
+    let failedState = manager.state(for: failedRepoWorktree)
+    let removedState = manager.state(for: removedWorktree)
+    guard let failedTabID = failedState.createTab(),
+      let failedSurfaceID = failedState.splitTree(for: failedTabID).root?.leftmostLeaf().id,
+      let removedTabID = removedState.createTab(),
+      let removedSurfaceID = removedState.splitTree(for: removedTabID).root?.leftmostLeaf().id
+    else {
+      Issue.record("Expected protected and removed surfaces")
+      return
+    }
+    let failedRepositoryID = RepositoryID(
+      failedRepoWorktree.repositoryRootURL.standardizedFileURL.path(percentEncoded: false)
+    )
+
+    manager.prune(
+      keeping: [activeWorktree.id],
+      protectingRepositoryIDs: [failedRepositoryID]
+    )
+
+    #expect(manager.stateIfExists(for: activeWorktree.id) != nil)
+    #expect(manager.stateIfExists(for: failedRepoWorktree.id) != nil)
+    #expect(manager.stateIfExists(for: removedWorktree.id) == nil)
+    #expect(failedState.hasSurface(failedSurfaceID, in: failedTabID))
+    let removedSession = session(for: removedSurfaceID)
+    await probe.waitForKill { $0.contains(removedSession) }
+    let killed = await probe.killedSessions()
+    #expect(killed.contains(session(for: removedSurfaceID)))
+    #expect(!killed.contains(session(for: failedSurfaceID)))
+  }
+
+  @Test func unexpectedExitedZmxSurfaceWithLiveSessionReattachesAndKeepsTab() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    guard let tabId = state.createTab(focusing: true),
+      let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    let surfaceID = surface.id
+    let originalSurfaceState = state.surfaceStates[surfaceID]
+    let projections = LockIsolated<[WorktreeTabProjection]>([])
+    state.onTabProjectionChanged = { projection in
+      projections.withValue { $0.append(projection) }
+    }
+    await probe.setListing([.init(name: session(for: surfaceID), clients: 0)])
+
+    surface.bridge.closeSurface(processAlive: false)
+    await probe.waitForListCalls(atLeast: 1)
+    await waitUntil("zmx surface replacement") {
+      guard let replacement = state.splitTree(for: tabId).root?.leftmostLeaf() else { return false }
+      return replacement.id == surfaceID && replacement !== surface
+    }
+
+    #expect(state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    guard let replacement = state.splitTree(for: tabId).root?.leftmostLeaf() else {
+      Issue.record("Expected a replacement surface")
+      return
+    }
+    #expect(replacement.id == surfaceID)
+    #expect(replacement !== surface)
+    #expect(replacement.shouldClaimFocus?() == true)
+    #expect(surface.shouldClaimFocus?() == false)
+    #expect(state.surfaceStates[surfaceID] === originalSurfaceState)
+    #expect(projections.value.last?.surfaceGeneration == 1)
+    #expect(await probe.killedSessions() == [])
+  }
+
+  @Test func unexpectedDetachedZmxSurfaceWithLiveSessionReattachesAndKeepsTab() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    guard let tabId = state.createTab(focusing: true),
+      let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    let surfaceID = surface.id
+    await probe.setListing([.init(name: session(for: surfaceID), clients: 0)])
+
+    surface.bridge.closeSurface(processAlive: true)
+    await probe.waitForListCalls(atLeast: 1)
+    await waitUntil("detached zmx surface replacement") {
+      guard let replacement = state.splitTree(for: tabId).root?.leftmostLeaf() else { return false }
+      return replacement.id == surfaceID && replacement !== surface
+    }
+
+    #expect(state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    guard let replacement = state.splitTree(for: tabId).root?.leftmostLeaf() else {
+      Issue.record("Expected a replacement surface")
+      return
+    }
+    #expect(replacement.id == surfaceID)
+    #expect(replacement !== surface)
+    #expect(await probe.killedSessions() == [])
+  }
+
+  @Test func unexpectedDetachedZmxSurfaceInSplitReattachesOnlyThatPane() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    guard let tabId = state.createTab(focusing: true),
+      let initialSurface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    #expect(state.performSplitAction(.newSplit(direction: .right), for: initialSurface.id))
+    let originalLeaves = state.splitTree(for: tabId).leaves()
+    guard originalLeaves.count == 2 else {
+      Issue.record("Expected a split tab")
+      return
+    }
+    let target = originalLeaves[0]
+    let sibling = originalLeaves[1]
+    let targetID = target.id
+    let siblingID = sibling.id
+    await probe.setListing([.init(name: session(for: targetID), clients: 0)])
+
+    target.bridge.closeSurface(processAlive: true)
+    await probe.waitForListCalls(atLeast: 1)
+    await waitUntil("split zmx surface replacement") {
+      let leaves = state.splitTree(for: tabId).leaves()
+      guard leaves.count == 2 else { return false }
+      let replacement = leaves.first { $0.id == targetID }
+      return replacement != nil
+        && replacement !== target
+        && leaves.contains { $0 === sibling }
+    }
+
+    #expect(state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    let leaves = state.splitTree(for: tabId).leaves()
+    #expect(leaves.count == 2)
+    #expect(Set(leaves.map(\.id)) == [targetID, siblingID])
+    #expect(leaves.contains { $0 === sibling })
+    #expect(await probe.killedSessions() == [])
+  }
+
+  @Test func ghosttyOriginatedCloseSurfaceInSplitWithAttachedClientClosesPaneSparingSession() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    guard let tabId = state.createTab(focusing: true),
+      let initialSurface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    #expect(state.performSplitAction(.newSplit(direction: .right), for: initialSurface.id))
+    let originalLeaves = state.splitTree(for: tabId).leaves()
+    guard originalLeaves.count == 2 else {
+      Issue.record("Expected a split tab")
+      return
+    }
+    let target = originalLeaves[0]
+    let sibling = originalLeaves[1]
+    let targetID = target.id
+    let siblingID = sibling.id
+    await probe.setListing([.init(name: session(for: targetID), clients: 1)])
+
+    target.bridge.closeSurface(processAlive: true)
+    await probe.waitForListCalls(atLeast: 1)
+    await waitUntil("split pane closes") {
+      let leaves = state.splitTree(for: tabId).leaves()
+      return leaves.count == 1 && leaves.first.map { $0 === sibling } == true
+    }
+
+    #expect(state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    let leaves = state.splitTree(for: tabId).leaves()
+    #expect(leaves.map(\.id) == [siblingID])
+    #expect(leaves.first.map { $0 === sibling } == true)
+    // Another client is attached (clients == 1), so the shared session must survive.
+    #expect(await probe.killedSessions() == [])
+  }
+
+  @Test func staleOldSurfaceCallbacksAreIgnoredAfterZmxReattach() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    let toggled = LockIsolated(false)
+    state.onCommandPaletteToggle = {
+      toggled.setValue(true)
+    }
+    guard let tabId = state.createTab(focusing: true),
+      let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    let surfaceID = surface.id
+    await probe.setListing([.init(name: session(for: surfaceID), clients: 0)])
+
+    surface.bridge.closeSurface(processAlive: false)
+    await probe.waitForListCalls(atLeast: 1)
+    await waitUntil("zmx surface replacement") {
+      guard let replacement = state.splitTree(for: tabId).root?.leftmostLeaf() else { return false }
+      return replacement !== surface
+    }
+
+    #expect(surface.bridge.onCommandPaletteToggle?() == false)
+    #expect(toggled.value == false)
+  }
+
+  @Test func unexpectedExitedZmxSurfaceWithoutLiveSessionClosesAndKillsSession() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    guard let tabId = state.createTab(focusing: false),
+      let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    let surfaceID = surface.id
+
+    let expectedKill = session(for: surfaceID)
+    surface.bridge.closeSurface(processAlive: false)
+    await probe.waitForListCalls(atLeast: 1)
+    await probe.waitForKill { $0.contains(expectedKill) }
+    let killed = await probe.killedSessions()
+    await waitUntil("zmx surface tab closes") {
+      !state.tabManager.tabs.contains(where: { $0.id == tabId })
+    }
+
+    #expect(!state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    #expect(state.surfaceStates[surfaceID] == nil)
+    #expect(killed == [session(for: surfaceID)])
+  }
+
+  @Test func unexpectedExitedZmxSurfaceWithUnavailableProbeClosesWithoutKillingSession() async {
+    let probe = ZmxTestProbe(listing: nil)
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    guard let tabId = state.createTab(focusing: false),
+      let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    let surfaceID = surface.id
+
+    surface.bridge.closeSurface(processAlive: false)
+    await probe.waitForListCalls(atLeast: 1)
+    await waitUntil("zmx surface tab closes") {
+      !state.tabManager.tabs.contains(where: { $0.id == tabId })
+    }
+
+    #expect(!state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    #expect(state.surfaceStates[surfaceID] == nil)
+    #expect(await probe.killedSessions() == [])
+  }
+
+  @Test func unexpectedExitedZmxSurfaceWithUnknownClientCountClosesWithoutKillingSession() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    guard let tabId = state.createTab(focusing: false),
+      let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    let surfaceID = surface.id
+    await probe.setListing([.init(name: session(for: surfaceID), clients: nil)])
+
+    surface.bridge.closeSurface(processAlive: false)
+    await probe.waitForListCalls(atLeast: 1)
+    await waitUntil("zmx surface tab closes") {
+      !state.tabManager.tabs.contains(where: { $0.id == tabId })
+    }
+
+    #expect(!state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    #expect(state.surfaceStates[surfaceID] == nil)
+    #expect(await probe.killedSessions() == [])
+  }
+
+  @Test func explicitExitedZmxSurfaceCloseDoesNotRecoverLiveSession() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    guard let tabId = state.createTab(focusing: false),
+      let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    let surfaceID = surface.id
+    await probe.setListing([.init(name: session(for: surfaceID), clients: 1)])
+
+    let expectedKill = session(for: surfaceID)
+    #expect(state.closeSurface(id: surfaceID))
+    surface.bridge.closeSurface(processAlive: false)
+    await probe.waitForKill { $0.contains(expectedKill) }
+    let killed = await probe.killedSessions()
+    await waitUntil("explicit zmx surface tab closes") {
+      !state.tabManager.tabs.contains(where: { $0.id == tabId })
+    }
+
+    #expect(!state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    #expect(state.surfaceStates[surfaceID] == nil)
+    #expect(killed == [session(for: surfaceID)])
+    #expect(await probe.listCallCount() == 0)
+  }
+
+  @Test func closeSurfaceBindingActionDoesNotRecoverLiveSession() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let state = manager.state(for: makeWorktree())
+    guard let tabId = state.createTab(focusing: false),
+      let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab and surface")
+      return
+    }
+    let surfaceID = surface.id
+    await probe.setListing([.init(name: session(for: surfaceID), clients: 1)])
+
+    let expectedKill = session(for: surfaceID)
+    #expect(state.performBindingAction("close_surface", onSurfaceID: surfaceID))
+    surface.bridge.closeSurface(processAlive: false)
+    await probe.waitForKill { $0.contains(expectedKill) }
+    let killed = await probe.killedSessions()
+    await waitUntil("binding-closed zmx surface tab closes") {
+      !state.tabManager.tabs.contains(where: { $0.id == tabId })
+    }
+
+    #expect(!state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    #expect(state.surfaceStates[surfaceID] == nil)
+    #expect(killed == [session(for: surfaceID)])
+    #expect(await probe.listCallCount() == 0)
+  }
+
+  @Test func bypassZmxSurfaceExitKeepsCloseOnExitBehavior() async {
+    let probe = ZmxTestProbe(listing: [])
+    let manager = makeZmxBackedManager(probe: probe)
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    manager.handleCommand(.runBlockingScript(worktree, kind: .archive, script: "echo ok"))
+    guard let tabId = state.tabManager.selectedTabId,
+      let surface = state.splitTree(for: tabId).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a blocking-script tab and surface")
+      return
+    }
+    let surfaceID = surface.id
+    await probe.setListing([.init(name: session(for: surfaceID), clients: 1)])
+
+    surface.bridge.closeSurface(processAlive: false)
+    await waitUntil("bypass-zmx tab closes") {
+      !state.tabManager.tabs.contains(where: { $0.id == tabId })
+    }
+
+    #expect(!state.tabManager.tabs.contains(where: { $0.id == tabId }))
+    #expect(state.surfaceStates[surfaceID] == nil)
+    #expect(await probe.listCallCount() == 0)
   }
 
   @Test func restoreLayoutSnapshotReDerivesPerSurfaceFlags() {
@@ -1239,7 +1682,7 @@ struct WorktreeTerminalManagerTests {
       return
     }
 
-    guard let tabs = manager.listTabs(worktreeID: worktree.id) else {
+    guard let tabs = manager.listTabs(worktreeID: worktree.id.rawValue) else {
       Issue.record("Expected non-nil tabs result")
       return
     }
@@ -1269,7 +1712,7 @@ struct WorktreeTerminalManagerTests {
       return
     }
 
-    guard let surfaces = manager.listSurfaces(worktreeID: worktree.id, tabID: tabID.rawValue.uuidString) else {
+    guard let surfaces = manager.listSurfaces(worktreeID: worktree.id.rawValue, tabID: tabID.rawValue.uuidString) else {
       Issue.record("Expected non-nil surfaces result")
       return
     }
@@ -1293,7 +1736,7 @@ struct WorktreeTerminalManagerTests {
     let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
     let worktree = makeWorktree()
     _ = manager.state(for: worktree)
-    #expect(manager.listSurfaces(worktreeID: worktree.id, tabID: "not-a-uuid") == nil)
+    #expect(manager.listSurfaces(worktreeID: worktree.id.rawValue, tabID: "not-a-uuid") == nil)
   }
 
   @Test func latestUnreadNotificationPicksNewestAcrossWorktrees() {
@@ -1656,12 +2099,165 @@ struct WorktreeTerminalManagerTests {
   private func makeWorktree(id: String = "/tmp/repo/wt-1") -> Worktree {
     let name = URL(fileURLWithPath: id).lastPathComponent
     return Worktree(
-      id: id,
+      id: WorktreeID(id),
       name: name,
       detail: "detail",
       workingDirectory: URL(fileURLWithPath: id),
-      repositoryRootURL: URL(fileURLWithPath: "/tmp/repo")
+      repositoryRootURL: URL(fileURLWithPath: "/tmp/repo"),
     )
+  }
+
+  private func makeZmxBackedManager(probe: ZmxTestProbe) -> WorktreeTerminalManager {
+    let zmxURL = FileManager.default.temporaryDirectory.appendingPathComponent("supacode-test-zmx-\(UUID().uuidString)")
+    let script = "#!/bin/sh\nexec /bin/cat\n"
+    do {
+      try script.write(to: zmxURL, atomically: true, encoding: .utf8)
+      try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: zmxURL.path)
+    } catch {
+      Issue.record("Failed to set up fake zmx binary: \(error)")
+    }
+
+    return withDependencies {
+      $0.zmxClient = ZmxClient(
+        executableURL: { zmxURL },
+        isBundled: { true },
+        killSession: { id in await probe.killSession(id) },
+        listSessionsWithClients: { await probe.listSessionsWithClients() },
+      )
+    } operation: {
+      let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+      _ = manager.state(for: makeWorktree())
+      return manager
+    }
+  }
+
+  nonisolated private func session(for surfaceID: UUID) -> String {
+    ZmxSessionID.make(surfaceID: surfaceID)
+  }
+
+  // MainActor work schedules cooperatively, so yield-poll it; the deadline guards CI load.
+  private func waitUntil(
+    _ description: String,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    condition: @MainActor () -> Bool
+  ) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: ZmxTestProbe.waitTimeout)
+    while !condition() && clock.now < deadline {
+      await Task.yield()
+    }
+    if !condition() {
+      Issue.record("Timed out waiting for \(description)", sourceLocation: sourceLocation)
+    }
+  }
+
+  private actor ZmxTestProbe {
+    // Backstop so a never-firing kill or probe fails fast instead of hanging.
+    static let waitTimeout: Duration = .seconds(10)
+
+    private enum Trigger {
+      case kill(@Sendable ([String]) -> Bool)
+      case list(threshold: Int)
+    }
+
+    // Resumed exactly once: by the event or the timeout.
+    private struct Waiter {
+      let id: UUID
+      let trigger: Trigger
+      let continuation: CheckedContinuation<Bool, Never>
+      let timeout: Task<Void, Never>
+    }
+
+    private var listing: [ZmxSessionListParser.Entry]?
+    private var killed: [String] = []
+    private var listCalls = 0
+    private var waiters: [Waiter] = []
+
+    init(listing: [ZmxSessionListParser.Entry]?) {
+      self.listing = listing
+    }
+
+    func setListing(_ listing: [ZmxSessionListParser.Entry]?) {
+      self.listing = listing
+    }
+
+    func listSessionsWithClients() -> [ZmxSessionListParser.Entry]? {
+      listCalls += 1
+      resumeWaiters()
+      return listing
+    }
+
+    func killSession(_ sessionID: String) {
+      killed.append(sessionID)
+      resumeWaiters()
+    }
+
+    func killedSessions() -> [String] {
+      killed
+    }
+
+    func listCallCount() -> Int {
+      listCalls
+    }
+
+    @discardableResult
+    func waitForKill(
+      where predicate: @escaping @Sendable ([String]) -> Bool,
+      sourceLocation: SourceLocation = #_sourceLocation
+    ) async -> Bool {
+      await wait(for: .kill(predicate), description: "zmx session kill", sourceLocation: sourceLocation)
+    }
+
+    @discardableResult
+    func waitForListCalls(
+      atLeast threshold: Int,
+      sourceLocation: SourceLocation = #_sourceLocation
+    ) async -> Bool {
+      await wait(for: .list(threshold: threshold), description: "zmx list probe call", sourceLocation: sourceLocation)
+    }
+
+    // The event resumes the waiter; the timeout only guards a regression.
+    private func wait(
+      for trigger: Trigger,
+      description: String,
+      sourceLocation: SourceLocation
+    ) async -> Bool {
+      if isSatisfied(trigger) { return true }
+      let id = UUID()
+      let satisfied = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        // Strong capture: bounded and cancelled on the event path, so the continuation always resumes.
+        let timeout = Task { [self] in
+          try? await Task.sleep(for: Self.waitTimeout)
+          await expireWaiter(id)
+        }
+        waiters.append(Waiter(id: id, trigger: trigger, continuation: continuation, timeout: timeout))
+      }
+      if !satisfied {
+        Issue.record("Timed out waiting for \(description)", sourceLocation: sourceLocation)
+      }
+      return satisfied
+    }
+
+    private func isSatisfied(_ trigger: Trigger) -> Bool {
+      switch trigger {
+      case .kill(let predicate): predicate(killed)
+      case .list(let threshold): listCalls >= threshold
+      }
+    }
+
+    private func resumeWaiters() {
+      waiters.removeAll { waiter in
+        guard isSatisfied(waiter.trigger) else { return false }
+        waiter.timeout.cancel()
+        waiter.continuation.resume(returning: true)
+        return true
+      }
+    }
+
+    private func expireWaiter(_ id: UUID) {
+      guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+      waiters.remove(at: index).continuation.resume(returning: false)
+    }
   }
 
   private func nextEvent(

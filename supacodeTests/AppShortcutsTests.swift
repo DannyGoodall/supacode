@@ -31,7 +31,7 @@ struct AppShortcutsTests {
   @Test func worktreeSelectionUsesControlNumberShortcuts() {
     expectNoDifference(
       AppShortcuts.worktreeSelection.map(\.display),
-      ["⌃1", "⌃2", "⌃3", "⌃4", "⌃5", "⌃6", "⌃7", "⌃8", "⌃9", "⌃0"]
+      ["⌃1", "⌃2", "⌃3", "⌃4", "⌃5", "⌃6", "⌃7", "⌃8", "⌃9"]
     )
 
     for shortcut in AppShortcuts.worktreeSelection {
@@ -41,7 +41,7 @@ struct AppShortcutsTests {
 
   @Test func tabSelectionGhosttyKeybindArgumentsMatchExpected() {
     expectNoDifference(
-      AppShortcuts.tabSelectionGhosttyKeybindArguments,
+      AppShortcuts.tabSelectionGhosttyKeybindArguments(from: [:]),
       [
         "--keybind=ctrl+1=goto_tab:1",
         "--keybind=ctrl+digit_1=goto_tab:1",
@@ -61,8 +61,6 @@ struct AppShortcutsTests {
         "--keybind=ctrl+digit_8=goto_tab:8",
         "--keybind=ctrl+9=goto_tab:9",
         "--keybind=ctrl+digit_9=goto_tab:9",
-        "--keybind=ctrl+0=goto_tab:10",
-        "--keybind=ctrl+digit_0=goto_tab:10",
       ]
     )
   }
@@ -74,13 +72,51 @@ struct AppShortcutsTests {
       #expect(arguments.contains(shortcut.ghosttyUnbindArgument))
     }
 
-    for argument in AppShortcuts.tabSelectionGhosttyKeybindArguments {
+    for argument in AppShortcuts.tabSelectionGhosttyKeybindArguments(from: [:]) {
       #expect(arguments.contains(argument))
     }
 
     for argument in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"].map({ "--keybind=ctrl+digit_\($0)=unbind" }) {
       #expect(arguments.contains(argument) == false)
     }
+  }
+
+  // MARK: - Tab selection honors overrides.
+
+  @Test func tabSelectionOmitsDisabledWorktreeSelection() {
+    let arguments = AppShortcuts.tabSelectionGhosttyKeybindArguments(
+      from: [.selectWorktree(6): .disabled]
+    )
+    // The disabled slot contributes no goto_tab binding, so ⌃6 reaches the terminal.
+    #expect(arguments.contains("--keybind=ctrl+6=goto_tab:6") == false)
+    #expect(arguments.contains("--keybind=ctrl+digit_6=goto_tab:6") == false)
+    // Other slots are unaffected.
+    #expect(arguments.contains("--keybind=ctrl+5=goto_tab:5"))
+  }
+
+  @Test func tabSelectionFollowsRemappedWorktreeSelection() {
+    let override = AppShortcutOverride(keyCode: UInt16(kVK_ANSI_J), modifiers: [.command])
+    let arguments = AppShortcuts.tabSelectionGhosttyKeybindArguments(
+      from: [.selectWorktree(1): override]
+    )
+    // The goto_tab binding moves to the remapped chord; the default ⌃1 is released.
+    #expect(arguments.contains("--keybind=super+j=goto_tab:1"))
+    #expect(arguments.contains("--keybind=ctrl+1=goto_tab:1") == false)
+    #expect(arguments.contains("--keybind=ctrl+digit_1=goto_tab:1") == false)
+  }
+
+  @Test func ghosttyCLIArgumentsReleaseDisabledWorktreeChordToTerminal() {
+    let arguments = AppShortcuts.ghosttyCLIKeybindArguments(from: [.selectWorktree(6): .disabled])
+    // Neither a goto_tab binding nor an unbind remains, so ⌃6 is delivered to the terminal.
+    #expect(arguments.contains { $0.hasPrefix("--keybind=ctrl+6=") } == false)
+    #expect(arguments.contains(AppShortcuts.selectWorktree6.ghosttyUnbindArgument) == false)
+  }
+
+  @Test func ghosttyCLIArgumentsMoveRemappedWorktreeChord() {
+    let override = AppShortcutOverride(keyCode: UInt16(kVK_ANSI_J), modifiers: [.command])
+    let arguments = AppShortcuts.ghosttyCLIKeybindArguments(from: [.selectWorktree(1): override])
+    #expect(arguments.contains("--keybind=super+j=goto_tab:1"))
+    #expect(arguments.contains { $0.hasPrefix("--keybind=ctrl+1=") } == false)
   }
 
   // MARK: - Shortcut identity.
@@ -95,7 +131,8 @@ struct AppShortcutsTests {
     #expect(AppShortcuts.openPullRequest.displayName == "Open Pull Request")
     #expect(AppShortcuts.toggleLeftSidebar.displayName == "Toggle Left Sidebar")
     #expect(AppShortcuts.selectWorktree1.displayName == "Select Worktree 1")
-    #expect(AppShortcuts.selectWorktree0.displayName == "Select Worktree 10")
+    #expect(AppShortcuts.selectWorktree9.displayName == "Select Worktree 9")
+    #expect(AppShortcutID.selectWorktree(0).displayName == "Select Worktree 10")
   }
 
   // MARK: - Effective shortcut resolution.
@@ -153,17 +190,17 @@ struct AppShortcutsTests {
   // MARK: - Active worktree selection slots.
 
   @Test func activeSlotsIncludeAllWhenNoOverrideAndRowsMatch() {
-    let slots = AppShortcuts.activeWorktreeSelectionSlots(overrides: [:], orderedRowsCount: 10)
-    #expect(slots.map(\.index) == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    let slots = AppShortcuts.activeWorktreeSelectionSlots(overrides: [:], orderedRowsCount: 9)
+    #expect(slots.map(\.index) == [0, 1, 2, 3, 4, 5, 6, 7, 8])
     expectNoDifference(slots.map(\.shortcut.display), AppShortcuts.worktreeSelection.map(\.display))
   }
 
   @Test func activeSlotsDropDisabledOverridePreservingOtherIndices() {
     let slots = AppShortcuts.activeWorktreeSelectionSlots(
       overrides: [.selectWorktree(6): .disabled],
-      orderedRowsCount: 10
+      orderedRowsCount: 9
     )
-    #expect(slots.map(\.index) == [0, 1, 2, 3, 4, 6, 7, 8, 9])
+    #expect(slots.map(\.index) == [0, 1, 2, 3, 4, 6, 7, 8])
     #expect(slots.allSatisfy { $0.index != 5 })
   }
 

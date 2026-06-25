@@ -636,8 +636,12 @@ private struct SidebarItemContextMenu: View {
     let isAllFoldersBulk = isAllFoldersBulk
     let vocab = store.state.worktreeVocabulary(forRepository: repositoryID)
 
+    // Open actions resolve local paths through Finder / editors, which can't
+    // reach a remote SSH host, so they're disabled (but still shown, matching
+    // the toolbar and menu bar) for a remote row.
     if !isBulkSelection, !worktree.isMissing {
       openActions(overrides: overrides)
+        .disabled(worktree.host != nil)
       Divider()
     }
 
@@ -684,6 +688,14 @@ private struct SidebarItemContextMenu: View {
           store.send(.openRepositorySettings(repositoryID))
         }
         .help("Open folder settings")
+        // Remote folders have no section header either, so the connection editor
+        // (offered on a git remote's section menu) lives here for them.
+        if worktree.host != nil {
+          Button("Edit Connection…", systemImage: "wifi") {
+            store.send(.requestEditRemoteRepository(repositoryID))
+          }
+          .help("Edit the SSH server, port, user, or path")
+        }
         Divider()
       } else if let row = contextRows.first,
         !row.isMainWorktree,
@@ -697,6 +709,24 @@ private struct SidebarItemContextMenu: View {
       }
     }
 
+    archiveAndDeleteActions(
+      contextRows: contextRows,
+      isBulkSelection: isBulkSelection,
+      isAllFoldersBulk: isAllFoldersBulk,
+      archiveShortcut: archiveShortcut,
+      deleteShortcut: deleteShortcut
+    )
+  }
+
+  @ViewBuilder
+  private func archiveAndDeleteActions(
+    contextRows: [SidebarItemFeature.State],
+    isBulkSelection: Bool,
+    isAllFoldersBulk: Bool,
+    archiveShortcut: AppShortcut?,
+    deleteShortcut: AppShortcut?
+  ) -> some View {
+    let vocab = store.state.worktreeVocabulary(forRepository: repositoryID)
     let archiveTargets =
       contextRows
       .filter { !$0.isMainWorktree && $0.lifecycle == .idle }
@@ -724,7 +754,16 @@ private struct SidebarItemContextMenu: View {
       }
       .appKeyboardShortcut(archiveShortcut)
     }
-    if !deleteTargets.isEmpty {
+    if !isBulkSelection, rowIsFolder, worktree.host != nil {
+      // A remote folder is the remote repository; its row has no section header,
+      // so removal lives here and must drop the config (the local delete
+      // pipeline only prunes local roots and would leave the config to reappear).
+      Button("Remove Remote Repository…", systemImage: "trash", role: .destructive) {
+        store.send(.requestDeleteRepository(repositoryID))
+      }
+      .help("Remove this remote repository (remote files are untouched)")
+      .appKeyboardShortcut(deleteShortcut)
+    } else if !deleteTargets.isEmpty {
       let deleteLabel =
         isBulkSelection
         ? (isAllFoldersBulk ? "Remove Folders…" : vocab.delete(plural: true))

@@ -9,13 +9,13 @@ import Testing
 
 /// Foundation coverage for the co-located Jujutsu (jj) integration:
 ///   * pure filesystem detection (`isColocatedJJRepository(at:)`),
-///   * the `RepositoryVCS` flavor + backward-compatible `isGitRepository`
+///   * the additive `isColocatedJJ` flag + backward-compatible `isGitRepository`
 ///     contract (git / jj+git / none), and
 ///   * the experimental-gate behavior in the repository loader.
 ///
 /// The whole feature is opt-in: with the gate off the loader must behave
 /// byte-for-byte like the historical git/folder classifier, so a
-/// colocated repo classifies as plain `.git`.
+/// colocated repo classifies as plain `.git` (`isColocatedJJ == false`).
 @MainActor
 struct RepositoryJJColocationTests {
 
@@ -90,95 +90,90 @@ struct RepositoryJJColocationTests {
     #expect(!Repository.isColocatedJJRepository(at: root))
   }
 
-  // MARK: - Model: flavor <-> isGitRepository contract
+  // MARK: - Model: isColocatedJJ <-> isGitRepository contract
 
   @Test func backwardCompatibleInitMapsBoolToGitOrFolder() {
     let git = Repository(
-      id: "/tmp/a", rootURL: URL(fileURLWithPath: "/tmp/a"), name: "a",
+      id: RepositoryID("/tmp/a"), rootURL: URL(fileURLWithPath: "/tmp/a"), name: "a",
       worktrees: [], isGitRepository: true
     )
-    #expect(git.vcs == .git)
     #expect(git.isGitRepository)
     #expect(!git.isColocatedJJ)
 
     let folder = Repository(
-      id: "/tmp/b", rootURL: URL(fileURLWithPath: "/tmp/b"), name: "b",
+      id: RepositoryID("/tmp/b"), rootURL: URL(fileURLWithPath: "/tmp/b"), name: "b",
       worktrees: [], isGitRepository: false
     )
-    #expect(folder.vcs == .folder)
     #expect(!folder.isGitRepository)
     #expect(!folder.isColocatedJJ)
   }
 
   @Test func defaultInitIsGitFlavor() {
     let repo = Repository(
-      id: "/tmp/a", rootURL: URL(fileURLWithPath: "/tmp/a"), name: "a", worktrees: []
+      id: RepositoryID("/tmp/a"), rootURL: URL(fileURLWithPath: "/tmp/a"), name: "a", worktrees: []
     )
-    #expect(repo.vcs == .git)
     #expect(repo.isGitRepository)
+    #expect(!repo.isColocatedJJ)
   }
 
-  /// The load-bearing backward-compat guarantee: a
-  /// colocated repo still answers `isGitRepository == true`, so every
-  /// existing git/none consumer keeps treating it as a git repo.
+  /// The load-bearing backward-compat guarantee: a colocated repo still answers
+  /// `isGitRepository == true`, so every existing git/none consumer keeps
+  /// treating it as a git repo while `isColocatedJJ` layers on top.
   @Test func colocatedFlavorStillReportsAsGitRepository() {
     let repo = Repository(
-      id: "/tmp/a", rootURL: URL(fileURLWithPath: "/tmp/a"), name: "a",
-      worktrees: [], vcs: .gitColocatedJJ
+      id: RepositoryID("/tmp/a"), rootURL: URL(fileURLWithPath: "/tmp/a"), name: "a",
+      worktrees: [], isGitRepository: true, isColocatedJJ: true
     )
-    #expect(repo.vcs == .gitColocatedJJ)
     #expect(repo.isGitRepository)
     #expect(repo.isColocatedJJ)
   }
 
-  // MARK: - Backend resolver (vcs × preferJJ)
+  // MARK: - Backend resolver (isColocatedJJ × preferJJ)
 
   @Test func colocatedWithUnsetPreferenceUsesJujutsu() {
-    #expect(Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: nil))
-    #expect(Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: true))
+    #expect(Repository.usesJujutsuBackend(isColocatedJJ: true, preferJJ: nil))
+    #expect(Repository.usesJujutsuBackend(isColocatedJJ: true, preferJJ: true))
   }
 
   @Test func colocatedWithGitOverrideUsesGit() {
-    #expect(!Repository.usesJujutsuBackend(vcs: .gitColocatedJJ, preferJJ: false))
+    #expect(!Repository.usesJujutsuBackend(isColocatedJJ: true, preferJJ: false))
   }
 
   @Test func plainGitIsNeverJujutsuEvenWhenPreferred() {
-    #expect(!Repository.usesJujutsuBackend(vcs: .git, preferJJ: true))
-    #expect(!Repository.usesJujutsuBackend(vcs: .git, preferJJ: nil))
+    #expect(!Repository.usesJujutsuBackend(isColocatedJJ: false, preferJJ: true))
+    #expect(!Repository.usesJujutsuBackend(isColocatedJJ: false, preferJJ: nil))
   }
 
-  @Test func folderIsNeverJujutsu() {
-    #expect(!Repository.usesJujutsuBackend(vcs: .folder, preferJJ: true))
-    #expect(!Repository.usesJujutsuBackend(vcs: .folder, preferJJ: nil))
-  }
+  // MARK: - Worktree-set rebuild preserves the jj flavor
 
-  /// Regression: in-place worktree-set rebuilds MUST preserve `vcs`. Renaming
-  /// (and add/remove worktree) used to reconstruct via `init(isGitRepository:)`
-  /// — whose default reclassified a co-located jj repo back to `.git`, which
+  /// Regression: in-place worktree-set rebuilds MUST preserve `isColocatedJJ`.
+  /// Renaming (and add/remove worktree) used to reconstruct via a fresh init
+  /// whose default reclassified a co-located jj repo back to plain git, which
   /// reverted the UI to git vocabulary after any such mutation.
-  @Test func replacingWorktreesPreservesVCSFlavor() {
+  @Test func withWorktreesPreservesJJFlavor() {
     let root = URL(fileURLWithPath: "/tmp/jj-replace")
-    let jjRepo = Repository(id: "jj", rootURL: root, name: "jj", worktrees: [], vcs: .gitColocatedJJ)
-    #expect(jjRepo.replacingWorktrees([]).vcs == .gitColocatedJJ)
-    #expect(jjRepo.replacingWorktrees([]).isColocatedJJ)
+    let jjRepo = Repository(
+      id: RepositoryID("jj"), rootURL: root, name: "jj", worktrees: [], isColocatedJJ: true)
+    #expect(jjRepo.withWorktrees([]).isColocatedJJ)
 
-    let folder = Repository(id: "f", rootURL: root, name: "f", worktrees: [], vcs: .folder)
-    #expect(folder.replacingWorktrees([]).vcs == .folder)
+    let folder = Repository(
+      id: RepositoryID("f"), rootURL: root, name: "f", worktrees: [], isGitRepository: false)
+    #expect(!folder.withWorktrees([]).isGitRepository)
+    #expect(!folder.withWorktrees([]).isColocatedJJ)
   }
 
   // MARK: - Loader gate (git / jj+git / none)
 
   private func loaderState(root: URL) -> RepositoriesFeature.State {
     let worktree = Worktree(
-      id: root.appending(path: "main").path(percentEncoded: false),
+      location: .local(workingDirectory: root, repositoryRoot: root),
+      kind: .git,
       name: "main",
-      detail: "",
-      workingDirectory: root,
-      repositoryRootURL: root
+      detail: ""
     )
     let repository = Repository(
-      id: root.path(percentEncoded: false),
-      rootURL: root,
+      location: .local(root),
+      kind: .git,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [worktree])
     )
@@ -194,14 +189,14 @@ struct RepositoryJJColocationTests {
     } operation: {
       let root = URL(fileURLWithPath: "/tmp/supacode-jj-gateoff")
       let worktree = Worktree(
-        id: "/tmp/supacode-jj-gateoff/main", name: "main", detail: "",
-        workingDirectory: root, repositoryRootURL: root
+        location: .local(workingDirectory: root, repositoryRoot: root), kind: .git,
+        name: "main", detail: ""
       )
       let store = TestStore(initialState: loaderState(root: root)) {
         RepositoriesFeature()
       } withDependencies: {
         // Even though the root *is* colocated on disk, the gate is off
-        // (default), so the loader must downgrade it to `.git`.
+        // (default), so the loader must leave `isColocatedJJ` false.
         $0.gitClient.worktrees = { _ in [worktree] }
         $0.gitClient.isColocatedJJRepository = { _ in true }
       }
@@ -211,13 +206,13 @@ struct RepositoryJJColocationTests {
       await store.receive(\.reloadRepositories)
       await store.receive(\.repositoriesLoaded)
 
-      let loaded = store.state.repositories[id: root.path(percentEncoded: false)]
-      #expect(loaded?.vcs == .git)
+      let loaded = store.state.repositories[id: RepositoryID(root.path(percentEncoded: false))]
+      #expect(loaded?.isColocatedJJ == false)
       #expect(loaded?.isGitRepository == true)
     }
   }
 
-  @Test func loaderClassifiesColocatedRepoAsGitColocatedJJWhenGateOn() async {
+  @Test func loaderClassifiesColocatedRepoAsColocatedJJWhenGateOn() async {
     await withDependencies {
       $0.defaultAppStorage = .inMemory
     } operation: {
@@ -226,8 +221,8 @@ struct RepositoryJJColocationTests {
 
       let root = URL(fileURLWithPath: "/tmp/supacode-jj-gateon")
       let worktree = Worktree(
-        id: "/tmp/supacode-jj-gateon/main", name: "main", detail: "",
-        workingDirectory: root, repositoryRootURL: root
+        location: .local(workingDirectory: root, repositoryRoot: root), kind: .git,
+        name: "main", detail: ""
       )
       let store = TestStore(initialState: loaderState(root: root)) {
         RepositoriesFeature()
@@ -241,10 +236,9 @@ struct RepositoryJJColocationTests {
       await store.receive(\.reloadRepositories)
       await store.receive(\.repositoriesLoaded)
 
-      let loaded = store.state.repositories[id: root.path(percentEncoded: false)]
-      #expect(loaded?.vcs == .gitColocatedJJ)
-      #expect(loaded?.isGitRepository == true)
+      let loaded = store.state.repositories[id: RepositoryID(root.path(percentEncoded: false))]
       #expect(loaded?.isColocatedJJ == true)
+      #expect(loaded?.isGitRepository == true)
     }
   }
 
@@ -257,8 +251,8 @@ struct RepositoryJJColocationTests {
 
       let root = URL(fileURLWithPath: "/tmp/supacode-jj-plaingit")
       let worktree = Worktree(
-        id: "/tmp/supacode-jj-plaingit/main", name: "main", detail: "",
-        workingDirectory: root, repositoryRootURL: root
+        location: .local(workingDirectory: root, repositoryRoot: root), kind: .git,
+        name: "main", detail: ""
       )
       let store = TestStore(initialState: loaderState(root: root)) {
         RepositoriesFeature()
@@ -272,8 +266,7 @@ struct RepositoryJJColocationTests {
       await store.receive(\.reloadRepositories)
       await store.receive(\.repositoriesLoaded)
 
-      let loaded = store.state.repositories[id: root.path(percentEncoded: false)]
-      #expect(loaded?.vcs == .git)
+      let loaded = store.state.repositories[id: RepositoryID(root.path(percentEncoded: false))]
       #expect(loaded?.isColocatedJJ == false)
     }
   }

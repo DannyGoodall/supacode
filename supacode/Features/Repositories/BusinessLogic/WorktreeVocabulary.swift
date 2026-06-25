@@ -14,6 +14,9 @@ struct WorktreeVocabulary: Equatable, Sendable {
 
   var workspaceNoun: String { isJJ ? "Workspace" : "Worktree" }
   var bookmarkNoun: String { isJJ ? "Bookmark" : "Branch" }
+  /// Plural of `bookmarkNoun`. Spelled out because "Branch" pluralizes to
+  /// "Branches", not "Branchs" — a bare `+ "s"` mangles the git wording.
+  var bookmarkNounPlural: String { isJJ ? "Bookmarks" : "Branches" }
 
   // MARK: Context-menu / row actions
   var renameBranch: String { "Rename \(bookmarkNoun)…" }

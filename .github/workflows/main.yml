@@ -97,6 +97,8 @@ jobs:
         with:
           submodules: recursive
       - uses: ./.github/actions/setup-macos
+        with:
+          disable-tools: spm:swiftlang/swift-format
       - name: Prepare build overrides
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -110,11 +112,14 @@ jobs:
           # Epoch build number: monotonic, computed once here so the single binary reused by tip and stable carries one version.
           BUILD_NUMBER=$(date +%s)
           mkdir -p build
+          # xcconfig treats // as a comment, which truncates URL values (https://… → https:).
+          # Break every // with $() (evaluates to empty) so the parser never sees a literal //.
+          xcconfig_escape() { printf '%s' "$1" | sed 's#//#/$()/#g'; }
           cat > build/ReleaseOverrides.xcconfig <<EOF
           CURRENT_PROJECT_VERSION = $BUILD_NUMBER
-          SENTRY_DSN = $SENTRY_DSN
-          POSTHOG_API_KEY = $POSTHOG_API_KEY
-          POSTHOG_HOST = $POSTHOG_HOST
+          SENTRY_DSN = $(xcconfig_escape "$SENTRY_DSN")
+          POSTHOG_API_KEY = $(xcconfig_escape "$POSTHOG_API_KEY")
+          POSTHOG_HOST = $(xcconfig_escape "$POSTHOG_HOST")
           EOF
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
           echo "XCODE_XCCONFIG_FILE=$PWD/build/ReleaseOverrides.xcconfig" >> "$GITHUB_ENV"
@@ -159,6 +164,28 @@ jobs:
           </plist>
           EOF
           make export-archive
+      - name: Verify embedded telemetry config
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find build/export -name "supacode.app" -maxdepth 3 -print -quit)"
+          PLIST="$APP_PATH/Contents/Info.plist"
+          assert_eq() {
+            local key="$1" expected="$2"
+            local actual
+            actual="$(/usr/libexec/PlistBuddy -c "Print :$key" "$PLIST")"
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::$key embedded as '$actual' but expected '$expected' (xcconfig // truncation?)"
+              exit 1
+            fi
+            echo "$key OK"
+          }
+          assert_eq SentryDSN "$SENTRY_DSN"
+          assert_eq PostHogAPIKey "$POSTHOG_API_KEY"
+          assert_eq PostHogHost "$POSTHOG_HOST"
       - name: Re-sign frameworks
         run: |
           set -ex
@@ -350,6 +377,9 @@ jobs:
       TAG: ${{ needs.detect.outputs.release_tag }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/download-artifact@v7
         with:
           name: build-artifacts
@@ -365,6 +395,24 @@ jobs:
           else
             gh api "repos/$RELEASE_REPO/releases/generate-notes" -f tag_name="$TAG" --jq '.body' > build/release-notes.md
           fi
+          # Prepend the tag's headline ahead of "## What's Changed". Gate on an
+          # annotated tag, else a lightweight tag reads the commit subject.
+          HEADLINE=""
+          if [ "$(git cat-file -t "$TAG" 2>/dev/null)" = tag ]; then
+            # Strip any signature defensively; these notes also feed the Sparkle appcast.
+            HEADLINE=$(git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' "$TAG" | sed '/-----BEGIN .*SIGNATURE-----/,$d')
+          fi
+          # Prepend only a well-formed headline: a `## ` subject with a non-empty body.
+          SUBJECT=$(printf '%s\n' "$HEADLINE" | sed -n '1p')
+          BODY=$(printf '%s\n' "$HEADLINE" | sed '1,2d')
+          case "$SUBJECT" in
+            '## '*)
+              if [ -n "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
+                { printf '%s\n\n' "$HEADLINE"; cat build/release-notes.md; } > build/release-notes.md.new
+                mv build/release-notes.md.new build/release-notes.md
+              fi
+              ;;
+          esac
       - name: Generate appcast with history and deltas
         run: |
           set -euo pipefail
@@ -399,16 +447,22 @@ jobs:
           printf "%s" "$SPARKLE_PRIVATE_KEY" | tr -d '\r\n\t ' | ./bins/generate_appcast --download-url-prefix "https://supacode.sh/download/$TAG/" --full-release-notes-url "https://github.com/supabitapp/supacode/releases" --embed-release-notes --maximum-versions $MAX_DELTAS --maximum-deltas $MAX_DELTAS --delta-compression lzma --ed-key-file - "$STAGING"
           cp "$STAGING/appcast.xml" build/appcast.xml
           find "$STAGING" -name "*.delta" -exec cp {} build/ \; 2>/dev/null || true
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          DELTA_FILES=$(find build -name "*.delta" -type f | sort | tr '\n' ' ' || true)
+          python3 scripts/generate_release_checksums.py "$TAG" build/checksums.json build/supacode.dmg build/supacode.app.zip $DELTA_FILES
       - name: Create release and upload assets
         run: |
           set -euo pipefail
           gh release create "$TAG" --title "$TAG" --notes-file build/release-notes.md --target "${{ github.sha }}" -R "$RELEASE_REPO" 2>/dev/null || \
           gh release edit "$TAG" --target "${{ github.sha }}" -R "$RELEASE_REPO"
           DELTA_FILES=$(find build -name "*.delta" -type f 2>/dev/null | tr '\n' ' ' || true)
-          gh release upload "$TAG" build/supacode.app.zip build/supacode.dmg build/appcast.xml $DELTA_FILES --clobber -R "$RELEASE_REPO"
+          gh release upload "$TAG" build/supacode.app.zip build/supacode.dmg build/appcast.xml build/checksums.json $DELTA_FILES --clobber -R "$RELEASE_REPO"
       - name: Verify download URLs
         run: |
           set -euo pipefail
+          curl -fsSL "https://supacode.sh/download/$TAG/checksums.json" -o /dev/null
           curl -fsSL "https://supacode.sh/download/$TAG/supacode.app.zip" -o /dev/null
           curl -fsSL "https://supacode.sh/download/$TAG/supacode.dmg" -o /dev/null
 
@@ -421,6 +475,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v7
         with:
           name: build-artifacts
@@ -439,7 +494,8 @@ jobs:
           done
 
           DELTA_FILES=$(find build -name "*.delta" -type f 2>/dev/null | tr '\n' ' ' || true)
-          gh release upload tip build/supacode.dmg build/supacode.app.zip build/appcast.xml $DELTA_FILES --clobber -R "${{ github.repository }}"
+          python3 scripts/generate_release_checksums.py tip build/checksums.json build/supacode.dmg build/supacode.app.zip $DELTA_FILES
+          gh release upload tip build/supacode.dmg build/supacode.app.zip build/appcast.xml build/checksums.json $DELTA_FILES --clobber -R "${{ github.repository }}"
 
           # Store current build as history asset for future delta generation
           MAX_DELTAS=10

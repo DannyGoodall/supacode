@@ -78,8 +78,8 @@ extension ShellClient: DependencyKey {
       )
     },
     runLoginImpl: { executableURL, arguments, currentDirectoryURL, log in
-      let shellURL = URL(fileURLWithPath: defaultShellPath())
-      let execCommand = shellExecCommand(for: shellURL)
+      let (shellURL, execCommand) = ShellClient.loginShellInvocation(
+        userShell: URL(fileURLWithPath: defaultShellPath()))
       let shellArguments =
         ["-l", "-c", execCommand, "--", executableURL.path(percentEncoded: false)] + arguments
       if log {
@@ -102,8 +102,8 @@ extension ShellClient: DependencyKey {
       )
     },
     runLoginStreamImpl: { executableURL, arguments, currentDirectoryURL, log in
-      let shellURL = URL(fileURLWithPath: defaultShellPath())
-      let execCommand = shellExecCommand(for: shellURL)
+      let (shellURL, execCommand) = ShellClient.loginShellInvocation(
+        userShell: URL(fileURLWithPath: defaultShellPath()))
       let shellArguments =
         ["-l", "-c", execCommand, "--", executableURL.path(percentEncoded: false)] + arguments
       if log {
@@ -184,6 +184,21 @@ nonisolated private func runProcessStream(
       let command = ([executableURL.path(percentEncoded: false)] + arguments).joined(separator: " ")
       do {
         try process.run()
+        // Terminate the child only when the consuming task is cancelled (e.g. a
+        // remote load probe timing out); on normal completion the process already
+        // exited, so signalling its pid would risk a reused pid. Without this the
+        // `waitUntilExit()` below blocks its thread forever on a stalled ssh
+        // connection and no timeout can fire. SIGTERM first, then SIGKILL after a
+        // short grace so an ssh that ignores SIGTERM can't keep the task hung.
+        let pid = process.processIdentifier
+        continuation.onTermination = { @Sendable termination in
+          guard case .cancelled = termination, pid > 0 else { return }
+          kill(pid, SIGTERM)
+          Task.detached {
+            try? await Task.sleep(for: .seconds(2))
+            if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+          }
+        }
         let stdoutTask = Task.detached {
           for await line in lineStream(from: outputHandle) {
             await outputAccumulator.append(line, source: .stdout)
@@ -250,14 +265,41 @@ nonisolated private func collectOutput(
   return finalOutput
 }
 
-nonisolated private func shellExecCommand(for shellURL: URL) -> String {
-  switch shellURL.lastPathComponent {
-  case "fish":
-    return "test -f ~/.config/fish/config.fish; and source ~/.config/fish/config.fish >/dev/null 2>&1; exec $argv"
-  case "bash":
-    return "[ -f ~/.bashrc ] && . ~/.bashrc >/dev/null 2>&1; exec \"$@\""
-  default:
-    return "[ -f ~/.zshrc ] && . ~/.zshrc >/dev/null 2>&1; exec \"$@\""
+extension ShellClient {
+  /// Builds the `(shell, -c command)` pair for a one-shot login-shell command.
+  /// We only drive shells we have a correct rc snippet for — zsh, bash, fish.
+  /// Anything else (nushell, sh/dash/ksh, pwsh, …) falls back to /bin/zsh, which
+  /// can actually parse the snippet, so the command runs instead of failing
+  /// (issue #100). The interactive terminal still uses the user's real shell.
+  nonisolated static func loginShellInvocation(userShell: URL) -> (shell: URL, command: String) {
+    let drivable: Set<String> = ["zsh", "bash", "fish"]
+    let shell =
+      drivable.contains(userShell.lastPathComponent)
+      ? userShell : URL(fileURLWithPath: "/bin/zsh")
+    let command: String
+    switch shell.lastPathComponent {
+    case "fish":
+      command = "test -f ~/.config/fish/config.fish; and source ~/.config/fish/config.fish >/dev/null 2>&1; exec $argv"
+    case "bash":
+      command = posixLoginCommand(rcFile: "~/.bashrc")
+    default:
+      command = posixLoginCommand(rcFile: "~/.zshrc")
+    }
+    return (shell, command)
+  }
+
+  /// Builds the zsh/bash one-shot command: capture the positional parameters, clear them, then source
+  /// the rc file and exec from the saved array. Sourcing shares `$@` with the caller, so an rc that
+  /// resets the positionals (e.g. `set --`) would otherwise wipe the command before `exec` (#441).
+  /// Clearing `$@` with `set --` before sourcing also keeps the target command out of the rc's view:
+  /// a dual-mode script dispatching on `$1` (e.g. `fzf-git.sh`) would otherwise see the probe's
+  /// arguments, hit its own `exit`, and kill the probe shell before `exec` ran (#477). The exec reads
+  /// from the saved array, so clearing the live positionals is safe.
+  nonisolated private static func posixLoginCommand(rcFile: String) -> String {
+    let capture = "__supacode_login_argv=(\"$@\")"
+    let clear = "set --"
+    let source = "[ -f \(rcFile) ] && . \(rcFile) >/dev/null 2>&1"
+    return "\(capture); \(clear); \(source); exec \"${__supacode_login_argv[@]}\""
   }
 }
 

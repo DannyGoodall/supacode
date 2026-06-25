@@ -348,8 +348,8 @@ struct JJClientTests {
       ]
     )
     let worktree = Worktree(
-      id: wsURL.path(percentEncoded: false), name: "feat-bookmark", detail: "",
-      workingDirectory: wsURL, repositoryRootURL: root
+      location: .local(workingDirectory: wsURL, repositoryRoot: root), kind: .git,
+      name: "feat-bookmark", detail: ""
     )
 
     let removed = try await JJClient(shell: shell).removeWorkspace(worktree, deleteBookmark: true)

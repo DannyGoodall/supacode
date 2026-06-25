@@ -8,6 +8,7 @@ public struct RepositorySettingsFeature {
   @ObservableState
   public struct State: Equatable {
     public var rootURL: URL
+    public var host: RemoteHost?
     public var isGitRepository: Bool
     /// Co-located git+jj repo with the experimental gate on — gates the
     /// per-repo "prefer jj" control.
@@ -35,6 +36,7 @@ public struct RepositorySettingsFeature {
 
     public init(
       rootURL: URL,
+      host: RemoteHost? = nil,
       isGitRepository: Bool = true,
       isColocatedJJ: Bool = false,
       settings: RepositorySettings,
@@ -48,6 +50,7 @@ public struct RepositorySettingsFeature {
       isBranchDataLoaded: Bool = false
     ) {
       self.rootURL = rootURL
+      self.host = host
       self.isGitRepository = isGitRepository
       self.isColocatedJJ = isColocatedJJ
       self.settings = settings
@@ -87,7 +90,7 @@ public struct RepositorySettingsFeature {
 
   @CasePathable
   public enum Delegate: Equatable {
-    case settingsChanged(URL)
+    case settingsChanged(URL, host: RemoteHost?)
   }
 
   @Dependency(RepositorySettingsGitClient.self) private var gitClient
@@ -101,7 +104,7 @@ public struct RepositorySettingsFeature {
       case .task:
         let rootURL = state.rootURL
         let isGitRepository = state.isGitRepository
-        @Shared(.repositorySettings(rootURL)) var repositorySettings
+        @Shared(.repositorySettings(rootURL, host: state.host)) var repositorySettings
         @Shared(.settingsFile) var settingsFile
         let settings = repositorySettings
         let global = settingsFile.global
@@ -180,9 +183,10 @@ public struct RepositorySettingsFeature {
         state.isBareRepository = isBareRepository
         guard updatedSettings != settings else { return .none }
         let rootURL = state.rootURL
-        @Shared(.repositorySettings(rootURL)) var repositorySettings
+        let host = state.host
+        @Shared(.repositorySettings(rootURL, host: host)) var repositorySettings
         $repositorySettings.withLock { $0 = updatedSettings }
-        return .send(.delegate(.settingsChanged(rootURL)))
+        return .send(.delegate(.settingsChanged(rootURL, host: host)))
 
       case .branchDataLoaded(let branches, let defaultBaseRef):
         state.defaultWorktreeBaseRef = defaultBaseRef
@@ -249,13 +253,14 @@ public struct RepositorySettingsFeature {
   /// Persists the current settings and notifies the delegate.
   private func persistAndNotify(state: inout State) -> Effect<Action> {
     let rootURL = state.rootURL
+    let host = state.host
     var normalizedSettings = state.settings
     normalizedSettings.worktreeBaseDirectoryPath = SupacodePaths.normalizedWorktreeBaseDirectoryPath(
       normalizedSettings.worktreeBaseDirectoryPath,
       repositoryRootURL: rootURL
     )
-    @Shared(.repositorySettings(rootURL)) var repositorySettings
+    @Shared(.repositorySettings(rootURL, host: host)) var repositorySettings
     $repositorySettings.withLock { $0 = normalizedSettings }
-    return .send(.delegate(.settingsChanged(rootURL)))
+    return .send(.delegate(.settingsChanged(rootURL, host: host)))
   }
 }

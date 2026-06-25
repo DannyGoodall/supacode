@@ -12,7 +12,7 @@ public nonisolated enum AppShortcutID: Codable, Hashable, Sendable, CodingKeyRep
   case selectNextWorktree, selectPreviousWorktree
   case worktreeHistoryBack, worktreeHistoryForward
   case selectWorktree(Int)
-  case openWorktree, revealInFinder, openRepository, openPullRequest, copyPath
+  case openWorktree, revealInFinder, openRepository, addRemoteRepository, openPullRequest, copyPath
   case runScript, stopRunScript
   case jumpToLatestUnread
 
@@ -55,6 +55,7 @@ public nonisolated enum AppShortcutID: Codable, Hashable, Sendable, CodingKeyRep
     case .openWorktree: "openWorktree"
     case .revealInFinder: "revealInFinder"
     case .openRepository: "openRepository"
+    case .addRemoteRepository: "addRemoteRepository"
     case .openPullRequest: "openPullRequest"
     case .copyPath: "copyPath"
     case .runScript: "runScript"
@@ -84,6 +85,7 @@ public nonisolated enum AppShortcutID: Codable, Hashable, Sendable, CodingKeyRep
     "openFinder": .openWorktree,
     "revealInFinder": .revealInFinder,
     "openRepository": .openRepository,
+    "addRemoteRepository": .addRemoteRepository,
     "openPullRequest": .openPullRequest,
     "copyPath": .copyPath,
     "runScript": .runScript,
@@ -125,6 +127,7 @@ public nonisolated enum AppShortcutID: Codable, Hashable, Sendable, CodingKeyRep
     case .openWorktree: "Open Worktree"
     case .revealInFinder: "Reveal in Finder"
     case .openRepository: "Open Repository or Folder"
+    case .addRemoteRepository: "Add Remote Repository or Folder"
     case .openPullRequest: "Open Pull Request"
     case .copyPath: "Copy Path"
     case .runScript: "Run Script"
@@ -265,31 +268,12 @@ public struct AppShortcutGroup: Identifiable {
 // MARK: - Registry.
 
 public enum AppShortcuts {
-  private struct TabSelectionBinding {
-    let unicode: String
-    let physical: String
-    let tabIndex: Int
-  }
-
-  private static let tabSelectionBindings: [TabSelectionBinding] = [
-    TabSelectionBinding(unicode: "1", physical: "digit_1", tabIndex: 1),
-    TabSelectionBinding(unicode: "2", physical: "digit_2", tabIndex: 2),
-    TabSelectionBinding(unicode: "3", physical: "digit_3", tabIndex: 3),
-    TabSelectionBinding(unicode: "4", physical: "digit_4", tabIndex: 4),
-    TabSelectionBinding(unicode: "5", physical: "digit_5", tabIndex: 5),
-    TabSelectionBinding(unicode: "6", physical: "digit_6", tabIndex: 6),
-    TabSelectionBinding(unicode: "7", physical: "digit_7", tabIndex: 7),
-    TabSelectionBinding(unicode: "8", physical: "digit_8", tabIndex: 8),
-    TabSelectionBinding(unicode: "9", physical: "digit_9", tabIndex: 9),
-    TabSelectionBinding(unicode: "0", physical: "digit_0", tabIndex: 10),
-  ]
-
   // MARK: - Shortcut definitions.
 
   public static let commandPalette = AppShortcut(id: .commandPalette, key: "p", modifiers: .command)
   public static let openSettings = AppShortcut(id: .openSettings, key: ",", modifiers: .command)
   public static let checkForUpdates = AppShortcut(id: .checkForUpdates, key: "u", modifiers: .command)
-  public static let showMainWindow = AppShortcut(id: .showMainWindow, key: "0", modifiers: .command)
+  public static let showMainWindow = AppShortcut(id: .showMainWindow, key: "0", modifiers: [.command, .shift])
 
   public static let toggleLeftSidebar = AppShortcut(id: .toggleLeftSidebar, key: "[", modifiers: .command)
   public static let revealInSidebar = AppShortcut(id: .revealInSidebar, key: "e", modifiers: [.command, .shift])
@@ -335,11 +319,13 @@ public enum AppShortcuts {
   public static let selectWorktree7 = AppShortcut(id: .selectWorktree(7), key: "7", modifiers: [.control])
   public static let selectWorktree8 = AppShortcut(id: .selectWorktree(8), key: "8", modifiers: [.control])
   public static let selectWorktree9 = AppShortcut(id: .selectWorktree(9), key: "9", modifiers: [.control])
-  public static let selectWorktree0 = AppShortcut(id: .selectWorktree(0), key: "0", modifiers: [.control])
 
   public static let openWorktree = AppShortcut(id: .openWorktree, key: "o", modifiers: .command)
   public static let revealInFinder = AppShortcut(id: .revealInFinder, key: "r", modifiers: [.command, .option])
   public static let openRepository = AppShortcut(id: .openRepository, key: "o", modifiers: [.command, .shift])
+  public static let addRemoteRepository = AppShortcut(
+    id: .addRemoteRepository, key: "k", modifiers: [.command, .shift]
+  )
   public static let openPullRequest = AppShortcut(id: .openPullRequest, key: "g", modifiers: [.command, .control])
   public static let copyPath = AppShortcut(id: .copyPath, key: "c", modifiers: [.command, .shift])
   public static let runScript = AppShortcut(id: .runScript, key: "r", modifiers: .command)
@@ -350,7 +336,7 @@ public enum AppShortcuts {
 
   public static let worktreeSelection: [AppShortcut] = [
     selectWorktree1, selectWorktree2, selectWorktree3, selectWorktree4, selectWorktree5,
-    selectWorktree6, selectWorktree7, selectWorktree8, selectWorktree9, selectWorktree0,
+    selectWorktree6, selectWorktree7, selectWorktree8, selectWorktree9,
   ]
 
   public static func worktreeSelectionShortcutDisplay(
@@ -393,8 +379,8 @@ public enum AppShortcuts {
     AppShortcutGroup(
       category: .actions,
       shortcuts: [
-        openWorktree, revealInFinder, openRepository, openPullRequest, copyPath, runScript, stopRunScript,
-        jumpToLatestUnread,
+        openWorktree, revealInFinder, openRepository, addRemoteRepository, openPullRequest,
+        copyPath, runScript, stopRunScript, jumpToLatestUnread,
       ]
     ),
   ]
@@ -405,11 +391,28 @@ public enum AppShortcuts {
 
   // MARK: - Tab selection Ghostty bindings.
 
-  public static let tabSelectionGhosttyKeybindArguments: [String] = tabSelectionBindings.flatMap { binding in
-    [
-      "--keybind=ctrl+\(binding.unicode)=goto_tab:\(binding.tabIndex)",
-      "--keybind=ctrl+\(binding.physical)=goto_tab:\(binding.tabIndex)",
-    ]
+  // Ghostty `goto_tab` bindings for worktree selection, derived from the user's
+  // effective shortcuts instead of a fixed list. A disabled shortcut produces no
+  // binding, so its chord (e.g. ⌃6) reaches the terminal instead of being captured.
+  // A remapped shortcut moves the binding to the chosen key. The physical `digit_N`
+  // variant is emitted only while the binding stays the default Control+digit, so
+  // non-US keyboard layouts keep working.
+  public static func tabSelectionGhosttyKeybindArguments(
+    from overrides: [AppShortcutID: AppShortcutOverride]
+  ) -> [String] {
+    worktreeSelection.flatMap { shortcut -> [String] in
+      guard case .selectWorktree(let slot) = shortcut.id,
+        let effective = shortcut.effective(from: overrides)
+      else {
+        return []
+      }
+      let tabIndex = slot == 0 ? 10 : slot
+      var arguments = ["--keybind=\(effective.ghosttyKeybind)=goto_tab:\(tabIndex)"]
+      if effective.ghosttyKeybind == "ctrl+\(slot)" {
+        arguments.append("--keybind=ctrl+digit_\(slot)=goto_tab:\(tabIndex)")
+      }
+      return arguments
+    }
   }
 
   // MARK: - Ghostty CLI arguments.
@@ -420,7 +423,7 @@ public enum AppShortcuts {
 
   public static func ghosttyCLIKeybindArguments(from overrides: [AppShortcutID: AppShortcutOverride]) -> [String] {
     let effectiveShortcuts = all.compactMap { $0.effective(from: overrides) }
-    return effectiveShortcuts.map(\.ghosttyUnbindArgument) + tabSelectionGhosttyKeybindArguments
+    return effectiveShortcuts.map(\.ghosttyUnbindArgument) + tabSelectionGhosttyKeybindArguments(from: overrides)
   }
 
   // MARK: - Conflict detection.

@@ -38,6 +38,7 @@ struct CommandPaletteFeature {
     case openSettings
     case newWorktree
     case openRepository
+    case addRemoteRepository
     case removeWorktree(Worktree.ID, Repository.ID)
     case archiveWorktree(Worktree.ID, Repository.ID)
     case renameBranch(Worktree.ID, Repository.ID)
@@ -166,20 +167,13 @@ struct CommandPaletteFeature {
     return scorer.rankedItems(from: items)
   }
 
-  static func commandPaletteItems(
-    from repositories: RepositoriesFeature.State,
-    ghosttyCommands: [GhosttyCommand] = [],
-    scripts: [ScriptDefinition] = [],
-    runningScriptIDs: Set<UUID> = []
-  ) -> [CommandPaletteItem] {
-    // The global worktree actions follow the SELECTED repo's backend, so they
-    // read "New Workspace" etc. when a jj row is selected (git otherwise).
-    let selectedIsJJ =
-      repositories.selectedWorktreeID
-      .flatMap { repositories.repositoryID(containing: $0) }
-      .map { repositories.usesJujutsuBackend(forRepository: $0) } ?? false
+  /// The always-present global actions, shown regardless of selection. The
+  /// worktree actions follow the SELECTED repo's backend, so they read
+  /// "New Workspace" etc. when a jj row is selected (git otherwise) — pass
+  /// `selectedIsJJ` so the vocabulary matches.
+  static func globalActionItems(selectedIsJJ: Bool = false) -> [CommandPaletteItem] {
     let globalVocab = WorktreeVocabulary(isJJ: selectedIsJJ)
-    var items: [CommandPaletteItem] = [
+    return [
       CommandPaletteItem(
         id: CommandPaletteItemID.globalCheckForUpdates,
         title: "Check for Updates",
@@ -197,6 +191,12 @@ struct CommandPaletteFeature {
         title: "Open Repository or Folder",
         subtitle: nil,
         kind: .openRepository
+      ),
+      CommandPaletteItem(
+        id: CommandPaletteItemID.globalAddRemoteRepository,
+        title: "Add Remote Repository",
+        subtitle: nil,
+        kind: .addRemoteRepository
       ),
       CommandPaletteItem(
         id: CommandPaletteItemID.globalNewWorktree,
@@ -220,6 +220,21 @@ struct CommandPaletteFeature {
         isJJ: selectedIsJJ
       ),
     ]
+  }
+
+  static func commandPaletteItems(
+    from repositories: RepositoriesFeature.State,
+    ghosttyCommands: [GhosttyCommand] = [],
+    scripts: [ScriptDefinition] = [],
+    runningScriptIDs: Set<UUID> = []
+  ) -> [CommandPaletteItem] {
+    // The global worktree actions follow the SELECTED repo's backend, so they
+    // read "New Workspace" etc. when a jj row is selected (git otherwise).
+    let selectedIsJJ =
+      repositories.selectedWorktreeID
+      .flatMap { repositories.repositoryID(containing: $0) }
+      .map { repositories.usesJujutsuBackend(forRepository: $0) } ?? false
+    var items = globalActionItems(selectedIsJJ: selectedIsJJ)
     if repositories.selectedWorktreeID != nil {
       items.append(contentsOf: ghosttyCommandItems(ghosttyCommands))
       items.append(contentsOf: scriptItems(scripts: scripts, runningScriptIDs: runningScriptIDs))
@@ -490,6 +505,7 @@ private enum CommandPaletteItemID {
   static let globalCheckForUpdates = "global.check-for-updates"
   static let globalOpenSettings = "global.open-settings"
   static let globalOpenRepository = "global.open-repository"
+  static let globalAddRemoteRepository = "global.add-remote-repository"
   static let globalNewWorktree = "global.new-worktree"
   static let globalRefreshWorktrees = "global.refresh-worktrees"
   static let globalViewArchivedWorktrees = "global.view-archived-worktrees"
@@ -499,6 +515,7 @@ private enum CommandPaletteItemID {
       globalCheckForUpdates,
       globalOpenSettings,
       globalOpenRepository,
+      globalAddRemoteRepository,
       globalNewWorktree,
       globalRefreshWorktrees,
       globalViewArchivedWorktrees,
@@ -615,6 +632,8 @@ private func delegateAction(for kind: CommandPaletteItem.Kind) -> CommandPalette
     return .newWorktree
   case .openRepository:
     return .openRepository
+  case .addRemoteRepository:
+    return .addRemoteRepository
   case .removeWorktree(let worktreeID, let repositoryID):
     return .removeWorktree(worktreeID, repositoryID)
   case .archiveWorktree(let worktreeID, let repositoryID):
@@ -636,14 +655,25 @@ private func delegateAction(for kind: CommandPaletteItem.Kind) -> CommandPalette
     .rerunFailedJobs,
     .openFailingCheckDetails:
     return pullRequestDelegateAction(for: kind)!
-  case .runScript(let definition):
-    return .runScript(definition)
-  case .stopScript(let scriptID, let name):
-    return .stopScript(scriptID, name: name)
+  case .runScript, .stopScript:
+    return scriptDelegateAction(for: kind)!
   #if DEBUG
     case .debugTestToast(let toast):
       return .debugTestToast(toast)
   #endif
+  }
+}
+
+private func scriptDelegateAction(
+  for kind: CommandPaletteItem.Kind
+) -> CommandPaletteFeature.Delegate? {
+  switch kind {
+  case .runScript(let definition):
+    return .runScript(definition)
+  case .stopScript(let scriptID, let name):
+    return .stopScript(scriptID, name: name)
+  default:
+    return nil
   }
 }
 
@@ -672,6 +702,7 @@ private func pullRequestDelegateAction(
     .openSettings,
     .newWorktree,
     .openRepository,
+    .addRemoteRepository,
     .removeWorktree,
     .archiveWorktree,
     .renameBranch,

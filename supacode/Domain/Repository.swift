@@ -2,87 +2,97 @@ import Foundation
 import IdentifiedCollections
 import SupacodeSettingsShared
 
-/// Version-control flavor of a repository root, resolved at load time.
-///
-/// `.git` and `.folder` are the historical two states; `.gitColocatedJJ`
-/// is a git repository that *also* has a colocated Jujutsu repo (a `.jj`
-/// directory sitting as a peer of `.git` in the repository root — jj's
-/// own definition of "colocated"). Both git flavors report
-/// `isGitRepository == true`, so every existing git-gated code path is
-/// unchanged when the flavor is `.gitColocatedJJ`; the jj augmentation is
-/// strictly additive and gated behind an experimental setting.
-///
-/// Runtime-only classification — never persisted (only the root path is
-/// persisted), so adding a case requires no migration. The flavor flips
-/// freely on reload as a directory is (un)initialized as git/jj.
-nonisolated enum RepositoryVCS: Hashable, Sendable {
-  case git
-  case gitColocatedJJ
-  case folder
-}
-
-struct Repository: Identifiable, Hashable, Sendable {
-  let id: String
-  let rootURL: URL
+nonisolated struct Repository: Identifiable, Hashable, Sendable {
+  /// Where the repository lives (local URL or remote host + path). The single
+  /// source of truth for local-vs-remote: `id`, `host`, `rootURL`, and the
+  /// FileManager-safe `localRootURL` all derive from it.
+  let location: RepositoryLocation
+  /// Git repo vs plain directory. Flips freely on reload when the root is
+  /// (un)initialized as a git repo; persistence is unchanged.
+  let kind: RepositoryKind
   let name: String
   let worktrees: IdentifiedArrayOf<Worktree>
-  /// Resolved VCS flavor for this root (see `RepositoryVCS`). Runtime
-  /// classification, not persisted. Prefer reading `isGitRepository` /
-  /// `isColocatedJJ` at call sites; `vcs` is the underlying source of
-  /// truth that distinguishes plain git from colocated git+jj.
-  let vcs: RepositoryVCS
 
-  /// `false` only for a plain (non-git) folder root. Stays `true` for
-  /// both `.git` and `.gitColocatedJJ` so the 50+ existing
-  /// `isGitRepository` consumers keep treating a colocated repo as a
-  /// git repository (backward compatibility for the git/none contract).
-  nonisolated var isGitRepository: Bool { vcs != .folder }
+  /// Branded id derived from the location (local: absolute path; remote:
+  /// `<user@host:port><path>`). Stored so legacy/test call sites can pass it
+  /// explicitly, but production construction always derives it.
+  let id: RepositoryID
 
-  /// Whether this root is a git repository with a colocated Jujutsu
-  /// repo. Only ever `true` when the experimental jj integration is on
-  /// (the loader downgrades colocated repos to `.git` when it is off).
-  nonisolated var isColocatedJJ: Bool { vcs == .gitColocatedJJ }
+  /// True only for a **local** git repo that also has a colocated Jujutsu repo
+  /// (a `.jj` directory peer of `.git`), and only ever set when the experimental
+  /// jj gate is on — the loader leaves it `false` otherwise. Strictly additive:
+  /// when `false`, behavior is byte-for-byte the upstream git/folder contract.
+  /// Always `false` for a remote repo, because the colocation probe is
+  /// FileManager-based and `location.localRootURL` is `nil` for remote. See
+  /// `openspec/changes/add-jj-colocation-support/UPSTREAM-RECONCILIATION.md` §4.1.
+  let isColocatedJJ: Bool
 
-  /// Backward-compatible initializer preserving the historical
-  /// `isGitRepository:` API. Maps to the two original flavors only —
-  /// callers that need the colocated flavor use `init(..., vcs:)`.
+  /// SSH host this repository lives on, or `nil` for a local repository.
+  var host: RemoteHost? { location.host }
+
+  var isGitRepository: Bool { kind == .git }
+
+  /// Display / settings-key URL. For a remote repo this is a synthetic
+  /// `file://` over the remote path; never hand it to FileManager.
+  var rootURL: URL { location.displayURL }
+
+  /// The on-disk URL for a local repository, `nil` for a remote one. Use this
+  /// for any FileManager work so a remote path can't be touched by accident.
+  var localRootURL: URL? { location.localRootURL }
+
+  /// Designated initializer: id is derived from the location.
   init(
-    id: String,
-    rootURL: URL,
+    location: RepositoryLocation,
+    kind: RepositoryKind,
     name: String,
     worktrees: IdentifiedArrayOf<Worktree>,
-    isGitRepository: Bool = true
+    isColocatedJJ: Bool = false
   ) {
-    self.init(
-      id: id,
-      rootURL: rootURL,
-      name: name,
-      worktrees: worktrees,
-      vcs: isGitRepository ? .git : .folder
-    )
-  }
-
-  init(
-    id: String,
-    rootURL: URL,
-    name: String,
-    worktrees: IdentifiedArrayOf<Worktree>,
-    vcs: RepositoryVCS
-  ) {
-    self.id = id
-    self.rootURL = rootURL
+    self.location = location
+    self.kind = kind
     self.name = name
     self.worktrees = worktrees
-    self.vcs = vcs
+    self.id = location.id
+    self.isColocatedJJ = isColocatedJJ
   }
 
-  /// Returns a copy with a new worktree set, preserving every other field —
-  /// crucially `vcs`. In-place rebuilders MUST use this rather than the
-  /// `init(isGitRepository:)` back-compat initializer, whose `isGitRepository`
-  /// defaults to `true` and would silently reclassify a `.gitColocatedJJ`
-  /// (or `.folder`) repository as `.git` on the next worktree mutation.
-  func replacingWorktrees(_ worktrees: IdentifiedArrayOf<Worktree>) -> Repository {
-    Repository(id: id, rootURL: rootURL, name: name, worktrees: worktrees, vcs: vcs)
+  /// Back-compat initializer: builds the location from `rootURL` + `host`.
+  /// Kept so existing call sites (and tests) compile while the model migrates.
+  init(
+    id: RepositoryID,
+    rootURL: URL,
+    name: String,
+    worktrees: IdentifiedArrayOf<Worktree>,
+    isGitRepository: Bool = true,
+    host: RemoteHost? = nil,
+    isColocatedJJ: Bool = false
+  ) {
+    if let host {
+      self.location = .remote(host, path: rootURL.path(percentEncoded: false))
+    } else {
+      self.location = .local(rootURL)
+    }
+    self.kind = isGitRepository ? .git : .folder
+    self.name = name
+    self.worktrees = worktrees
+    self.id = id
+    self.isColocatedJJ = isColocatedJJ
+  }
+
+  /// Copy preserving `location`, `kind`, and the jj flavor, swapping only the
+  /// worktree set, so a remote repo's host/kind — and a colocated repo's
+  /// `isColocatedJJ` — survive an in-state worktree mutation. In-place
+  /// rebuilders MUST use this rather than a fresh `init`, whose `isColocatedJJ`
+  /// defaults to `false` and would silently reclassify a colocated repo on the
+  /// next worktree mutation.
+  func withWorktrees(_ worktrees: IdentifiedArrayOf<Worktree>) -> Repository {
+    Repository(
+      location: location,
+      kind: kind,
+      name: name,
+      worktrees: worktrees,
+      isColocatedJJ: isColocatedJJ
+    )
   }
 
   var initials: String {
@@ -142,8 +152,8 @@ struct Repository: Identifiable, Hashable, Sendable {
   ///
   /// Pure FileManager call — safe to invoke off the main actor from the
   /// `GitClientDependency` closure. Detection alone is harmless; the
-  /// loader only promotes a root to `.gitColocatedJJ` when the
-  /// experimental setting is enabled.
+  /// loader only sets `isColocatedJJ` on a root when the experimental
+  /// setting is enabled.
   nonisolated static func isColocatedJJRepository(at rootURL: URL) -> Bool {
     guard isGitRepository(at: rootURL) else { return false }
     let jjPath =
@@ -156,46 +166,21 @@ struct Repository: Identifiable, Hashable, Sendable {
   }
 
   /// Whether a repository should be driven by the Jujutsu backend rather than
-  /// Git. Only co-located repositories are eligible — and a root is only ever
-  /// classified `.gitColocatedJJ` when the experimental gate is on, so the gate
-  /// is implicit here. `preferJJ` is the persisted per-repository tri-state:
-  /// `nil` uses the default (prefer jj for a co-located repo), `false` is an
-  /// explicit Git override for that repository, and `true` is explicit jj.
-  nonisolated static func usesJujutsuBackend(vcs: RepositoryVCS, preferJJ: Bool?) -> Bool {
-    vcs == .gitColocatedJJ && (preferJJ ?? true)
+  /// Git. Only co-located repositories are eligible — and `isColocatedJJ` is
+  /// only ever `true` when the experimental gate is on, so the gate is implicit
+  /// here. `preferJJ` is the persisted per-repository tri-state: `nil` uses the
+  /// default (prefer jj for a co-located repo), `false` is an explicit Git
+  /// override for that repository, and `true` is explicit jj.
+  nonisolated static func usesJujutsuBackend(isColocatedJJ: Bool, preferJJ: Bool?) -> Bool {
+    isColocatedJJ && (preferJJ ?? true)
   }
 
-  /// Prefix on folder-synthetic worktree ids. Single source of truth
-  /// so reducer call sites that need to recover the repo id from a
-  /// folder worktree id (see `repositoryID(fromFolderWorktreeID:)`)
-  /// stay in sync with the constructor below.
-  nonisolated static let folderWorktreeIDPrefix = "folder:"
-
-  /// Stable synthetic worktree id for folder repositories. Keeps the
-  /// existing `SidebarSelection.worktree(id)` + terminal-manager
-  /// plumbing unchanged — folders reuse the same selection path.
+  /// Synthetic worktree id for a local folder repository: the repo root path.
+  /// Equals the owning repo id, so it round-trips back via `RepositoryID(_:)`;
+  /// it can't collide with a git worktree because a path is git or folder, never
+  /// both at once.
   nonisolated static func folderWorktreeID(for rootURL: URL) -> Worktree.ID {
-    folderWorktreeIDPrefix + rootURL.standardizedFileURL.path(percentEncoded: false)
-  }
-
-  /// Round-trip for `folderWorktreeID(for:)`: recover the owning
-  /// `Repository.ID` (the standardized path) from a folder-synthetic
-  /// worktree id. Returns `nil` for non-folder ids so callers can
-  /// distinguish "this isn't a folder worktree" from "this is a
-  /// folder worktree without a known repo."
-  nonisolated static func repositoryID(
-    fromFolderWorktreeID worktreeID: Worktree.ID
-  ) -> Repository.ID? {
-    guard worktreeID.hasPrefix(folderWorktreeIDPrefix) else { return nil }
-    return String(worktreeID.dropFirst(folderWorktreeIDPrefix.count))
-  }
-
-  /// Whether `worktreeID` is a folder-synthetic worktree id (as
-  /// produced by `folderWorktreeID(for:)`). Cheaper than calling
-  /// `repositoryID(fromFolderWorktreeID:)` when the caller only
-  /// wants the discrimination.
-  nonisolated static func isFolderWorktreeID(_ worktreeID: Worktree.ID) -> Bool {
-    worktreeID.hasPrefix(folderWorktreeIDPrefix)
+    WorktreeID(RepositoryLocation.local(rootURL.standardizedFileURL).id.rawValue)
   }
 
   /// Shared trim + fallback for the sidebar header and the highlight-row tag.

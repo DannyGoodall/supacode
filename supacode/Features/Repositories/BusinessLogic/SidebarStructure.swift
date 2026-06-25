@@ -160,6 +160,33 @@ struct SidebarItemGroup: Identifiable, Equatable, Sendable {
   }
 }
 
+/// Per-repo tally of rows hoisted into the highlight sections, surfaced as a
+/// muted summary line at the bottom of the repo section so a hoisted row stays
+/// discoverable from its origin repo without rendering a duplicate. `revealTarget`
+/// is the row a click scrolls to: the repo's first pinned hoist, else its first
+/// active hoist.
+struct SidebarHoistSummary: Equatable, Sendable {
+  let pinnedCount: Int
+  let activeCount: Int
+  let revealTarget: Worktree.ID
+
+  /// Nil when neither bucket has a row, so a `(0, 0)` summary is unrepresentable.
+  init?(pinnedCount: Int, activeCount: Int, revealTarget: Worktree.ID) {
+    guard pinnedCount > 0 || activeCount > 0 else { return nil }
+    self.pinnedCount = pinnedCount
+    self.activeCount = activeCount
+    self.revealTarget = revealTarget
+  }
+
+  /// Spoken VoiceOver form, pinned before active, omitting a zero bucket.
+  var label: String {
+    var parts: [String] = []
+    if pinnedCount > 0 { parts.append("+\(pinnedCount) \(SidebarStructure.HighlightKind.pinned.summaryNoun)") }
+    if activeCount > 0 { parts.append("+\(activeCount) \(SidebarStructure.HighlightKind.active.summaryNoun)") }
+    return parts.joined(separator: ", ")
+  }
+}
+
 /// Single source of truth for what the sidebar List renders. The reducer
 /// builds it once per `recomputeSidebarStructure()` and caches it on
 /// `RepositoriesFeature.State.sidebarStructure`; the view walks `sections`
@@ -175,6 +202,14 @@ struct SidebarStructure: Equatable, Sendable {
       case .active: "Active"
       }
     }
+
+    /// Lowercase noun used in the per-repo hoist summary line.
+    var summaryNoun: String {
+      switch self {
+      case .pinned: "pinned"
+      case .active: "active"
+      }
+    }
   }
 
   enum Section: Equatable, Sendable, Identifiable {
@@ -185,7 +220,8 @@ struct SidebarStructure: Equatable, Sendable {
       repositoryID: Repository.ID,
       rootURL: URL,
       customTitle: String?,
-      color: RepositoryColor?
+      color: RepositoryColor?,
+      isRemote: Bool
     )
     case placeholder
 
@@ -194,7 +230,7 @@ struct SidebarStructure: Equatable, Sendable {
       case .highlight(let kind, _): .highlight(kind)
       case .repository(let repositoryID, _): .repository(repositoryID)
       case .folder(let repositoryID, _): .folder(repositoryID)
-      case .failedRepository(let repositoryID, _, _, _): .failedRepository(repositoryID)
+      case .failedRepository(let repositoryID, _, _, _, _): .failedRepository(repositoryID)
       case .placeholder: .placeholder
       }
     }
@@ -222,6 +258,9 @@ struct SidebarStructure: Equatable, Sendable {
   /// subtitle on highlight rows. Built only for repos that contributed at
   /// least one row to the highlight sections.
   var repositoryHighlightByID: [Repository.ID: SidebarHighlightRepoTag]
+  /// Per-repo hoisted-row tally; git repos only, built only for repos that
+  /// contributed at least one highlight row.
+  var hoistSummaryByRepositoryID: [Repository.ID: SidebarHoistSummary]
   /// Outer-ForEach data ordering for repository sections. The view uses
   /// this to translate `.onMove` flat offsets into the index space the
   /// `.repositoriesMoved` reducer action expects.
@@ -233,6 +272,7 @@ struct SidebarStructure: Equatable, Sendable {
     hotkeySlots: [],
     slotByID: [:],
     repositoryHighlightByID: [:],
+    hoistSummaryByRepositoryID: [:],
     reorderableRepositoryIDs: []
   )
 
@@ -245,6 +285,7 @@ struct SidebarStructure: Equatable, Sendable {
     hotkeySlots: [],
     slotByID: [:],
     repositoryHighlightByID: [:],
+    hoistSummaryByRepositoryID: [:],
     reorderableRepositoryIDs: []
   )
 }
@@ -342,7 +383,7 @@ extension RepositoriesFeature.Action {
     // Bulk repository / worktree set changes that touch all caches.
     case .repositoriesLoaded, .openRepositoriesFinished,
       .repositoryRemovalCompleted, .repositoriesRemoved,
-      .removeFailedRepository,
+      .removeFailedRepository, .remoteRepositoryResolved,
       .archiveWorktreeApply, .unarchiveWorktree,
       .deleteWorktreeApply, .worktreeDeleted,
       .createWorktreeInRepository, .createRandomWorktreeInRepository,
@@ -354,6 +395,11 @@ extension RepositoriesFeature.Action {
     // and never mutates `state`. The downstream `.worktreeBranchNameLoaded` /
     // `.repositoryPullRequestsLoaded` arms declare their own invalidations.
     case .worktreeInfoEvent:
+      return []
+
+    // Pure effect launcher: spawns the async SSH resolution, mutates no state.
+    // The per-repo `.remoteRepositoryResolved` results recompute the caches.
+    case .resolveRemoteRepositories:
       return []
 
     // `worktreeBranchNameLoaded` mutates `worktree.name` via `updateWorktreeName`,
@@ -399,11 +445,15 @@ extension RepositoriesFeature.Action {
       return []
 
     // Everything else is UI / effects / transient state, no cache touched.
-    case .task, .setOpenPanelPresented, .loadPersistedRepositories,
+    case .task, .setOpenPanelPresented,
+      .requestAddRemoteRepository, .requestEditRemoteRepository, .remoteConnectionForm,
+      .loadPersistedRepositories,
+      .removeRemoteRepository,
       .refreshWorktrees, .reloadRepositories,
       .setSidebarSelectedWorktreeIDs,
       .openRepositories,
-      .revealSelectedWorktreeInSidebar, .consumePendingSidebarReveal,
+      .revealSelectedWorktreeInSidebar, .revealHoistedWorktreeInSidebar,
+      .consumePendingSidebarReveal,
       .createRandomWorktree,
       .promptedWorktreeCreationDataLoaded, .promptedWorktreeBranchesLoaded,
       .startPromptedWorktreeCreation,
@@ -495,6 +545,7 @@ extension RepositoriesFeature.State {
         hotkeySlots: [],
         slotByID: [:],
         repositoryHighlightByID: [:],
+        hoistSummaryByRepositoryID: [:],
         reorderableRepositoryIDs: []
       )
     }
@@ -518,15 +569,18 @@ extension RepositoriesFeature.State {
       sections: sections
     )
 
+    let highlightProjections = computeRepositoryHighlightProjections(
+      pinnedHoisted: hoists.pinned,
+      activeHoisted: hoists.active
+    )
+
     return SidebarStructure(
       sections: sections,
       hoistedRowIDs: hoists.hoistedSet,
       hotkeySlots: hotkey.slots,
       slotByID: hotkey.slotByID,
-      repositoryHighlightByID: computeRepositoryHighlightTags(
-        pinnedHoisted: hoists.pinned,
-        activeHoisted: hoists.active
-      ),
+      repositoryHighlightByID: highlightProjections.tags,
+      hoistSummaryByRepositoryID: highlightProjections.summaries,
       reorderableRepositoryIDs: repoSections.reorderableRepositoryIDs
     )
   }
@@ -584,31 +638,59 @@ extension RepositoriesFeature.State {
       grouping: pendingWorktrees,
       by: \.repositoryID
     ).mapValues { Set($0.map(\.id)) }
+    // Failed local repos have no `repositories[id:]` entry, so resolve their
+    // root from the persisted `repositoryRoots` instead.
+    let localRootsByID: [Repository.ID: URL] = Dictionary(
+      uniqueKeysWithValues: repositoryRoots.map {
+        (RepositoryID($0.standardizedFileURL.path(percentEncoded: false)), $0.standardizedFileURL)
+      }
+    )
 
-    for rootURL in orderedRepositoryRoots() {
-      let repositoryID = rootURL.standardizedFileURL.path(percentEncoded: false)
+    // Local and remote repositories share one flat, reorderable order driven by
+    // `orderedRepositoryIDs()` (local roots and host-keyed remote ids honoring
+    // the persisted sidebar order). Remote repos are no longer pinned below the
+    // local ones: the user can interleave local and remote rows by drag.
+    // `reorderableRepositoryIDs` mirrors `orderedRepositoryIDs()` 1:1 (even ids
+    // with no rendered section, e.g. a still-loading root or a hoisted folder)
+    // so the offset-based `.repositoriesMoved` move maps cleanly back.
+    for repositoryID in orderedRepositoryIDs() {
+      reorderableRepositoryIDs.append(repositoryID)
+      let repository = repositories[id: repositoryID]
+      let isRemote = repository?.host != nil
+
+      // A disconnected remote keeps a placeholder repository (so it isn't
+      // pruned) plus a load failure; render it like a missing local folder.
       if loadFailuresByID[repositoryID] != nil {
+        guard let rootURL = localRootsByID[repositoryID] ?? repository?.rootURL else { continue }
         let sectionEntry = sidebar.sections[repositoryID]
+        // A folder's custom name / color live on its synthetic folder-worktree
+        // item (the row is a worktree row), not the section, so fall back to it.
+        let folderItem = sectionEntry?.folderWorktreeItem(for: repositoryID)
         sections.append(
           .failedRepository(
             repositoryID: repositoryID,
             rootURL: rootURL,
-            customTitle: sectionEntry?.title,
-            color: sectionEntry?.color
+            customTitle: sectionEntry?.title ?? folderItem?.title,
+            color: sectionEntry?.color ?? folderItem?.color,
+            isRemote: isRemote
           )
         )
-        reorderableRepositoryIDs.append(repositoryID)
         continue
       }
-      guard let repository = repositories[id: repositoryID] else { continue }
-      reorderableRepositoryIDs.append(repositoryID)
+
+      guard let repository else { continue }
+
       if !repository.isGitRepository {
-        let folderRowID = Repository.folderWorktreeID(for: repository.rootURL)
-        if !hoisted.contains(folderRowID) {
-          sections.append(.folder(repositoryID: repositoryID, rowID: folderRowID))
-        }
+        // Local folder rows key off the path-derived synthetic id; a remote
+        // folder uses its synthetic worktree's own host-keyed id so it never
+        // collides with a local folder at the same path.
+        let folderRowID =
+          isRemote ? repository.worktrees.first?.id : Repository.folderWorktreeID(for: repository.rootURL)
+        guard let folderRowID, !hoisted.contains(folderRowID) else { continue }
+        sections.append(.folder(repositoryID: repositoryID, rowID: folderRowID))
         continue
       }
+
       let groups = SidebarItemGroup.computeSlots(
         in: self,
         repositoryID: repositoryID,
@@ -618,7 +700,11 @@ extension RepositoriesFeature.State {
       )
       sections.append(.repository(repositoryID: repositoryID, groups: groups))
     }
-    return RepositorySectionsBuild(sections: sections, reorderableRepositoryIDs: reorderableRepositoryIDs)
+
+    return RepositorySectionsBuild(
+      sections: sections,
+      reorderableRepositoryIDs: reorderableRepositoryIDs
+    )
   }
 
   /// Hotkey assignment output for a single structure pass.
@@ -649,32 +735,65 @@ extension RepositoriesFeature.State {
     return HotkeyOrdering(slots: hotkeyWorktreeSlots(for: order), slotByID: slotByID)
   }
 
-  private func computeRepositoryHighlightTags(
+  /// Per-repo highlight projections derived in a single walk of the hoisted
+  /// arrays.
+  private struct HighlightProjections {
+    var tags: [Repository.ID: SidebarHighlightRepoTag]
+    var summaries: [Repository.ID: SidebarHoistSummary]
+  }
+
+  /// Resolve the highlight tags (every contributing repo) and the hoist
+  /// summaries (git repos only) in one pass. Walks the ordered arrays, not
+  /// `hoistedSet`, so `revealTarget` is deterministic: a repo's first pinned
+  /// hoist, else its first active.
+  private func computeRepositoryHighlightProjections(
     pinnedHoisted: [Worktree.ID],
     activeHoisted: [Worktree.ID]
-  ) -> [Repository.ID: SidebarHighlightRepoTag] {
-    guard !pinnedHoisted.isEmpty || !activeHoisted.isEmpty else { return [:] }
+  ) -> HighlightProjections {
+    guard !pinnedHoisted.isEmpty || !activeHoisted.isEmpty else {
+      return HighlightProjections(tags: [:], summaries: [:])
+    }
+
     var contributingRepoIDs: Set<Repository.ID> = []
+    var pinnedCounts: [Repository.ID: Int] = [:]
+    var activeCounts: [Repository.ID: Int] = [:]
+    var firstPinned: [Repository.ID: Worktree.ID] = [:]
+    var firstActive: [Repository.ID: Worktree.ID] = [:]
+
     for id in pinnedHoisted {
-      if let repoID = sidebarItems[id: id]?.repositoryID {
-        contributingRepoIDs.insert(repoID)
-      }
+      guard let repoID = sidebarItems[id: id]?.repositoryID else { continue }
+      contributingRepoIDs.insert(repoID)
+      pinnedCounts[repoID, default: 0] += 1
+      if firstPinned[repoID] == nil { firstPinned[repoID] = id }
     }
     for id in activeHoisted {
-      if let repoID = sidebarItems[id: id]?.repositoryID {
-        contributingRepoIDs.insert(repoID)
-      }
+      guard let repoID = sidebarItems[id: id]?.repositoryID else { continue }
+      contributingRepoIDs.insert(repoID)
+      activeCounts[repoID, default: 0] += 1
+      if firstActive[repoID] == nil { firstActive[repoID] = id }
     }
+
+    // Output is keyed by repo id, so build order is irrelevant.
     var tags: [Repository.ID: SidebarHighlightRepoTag] = [:]
+    var summaries: [Repository.ID: SidebarHoistSummary] = [:]
     for repoID in contributingRepoIDs {
       guard let repository = repositories[id: repoID] else { continue }
       let section = sidebar.sections[repoID]
       tags[repoID] = SidebarHighlightRepoTag(
         repoName: Repository.sidebarDisplayName(custom: section?.title, fallback: repository.name),
-        repoColor: section?.color
+        repoColor: section?.color,
+        hostInfo: repository.host?.displayAuthority
       )
+      guard repository.isGitRepository, let revealTarget = firstPinned[repoID] ?? firstActive[repoID] else {
+        continue
+      }
+      summaries[repoID] = SidebarHoistSummary(
+        pinnedCount: pinnedCounts[repoID] ?? 0,
+        activeCount: activeCounts[repoID] ?? 0,
+        revealTarget: revealTarget
+      )  // Non-nil: `revealTarget` exists only when a bucket contributed a row.
     }
-    return tags
+    return HighlightProjections(tags: tags, summaries: summaries)
   }
 
   /// Walk the freshly-built sections to extract visible per-repo row IDs in
@@ -842,8 +961,8 @@ extension SidebarItemGroup {
     in state: RepositoriesFeature.State
   ) -> [SidebarItemID] {
     ids.sorted { lhs, rhs in
-      let lhsName = state.sidebarItems[id: lhs]?.branchName ?? lhs
-      let rhsName = state.sidebarItems[id: rhs]?.branchName ?? rhs
+      let lhsName = state.sidebarItems[id: lhs]?.branchName ?? lhs.rawValue
+      let rhsName = state.sidebarItems[id: rhs]?.branchName ?? rhs.rawValue
       return lhsName.localizedCaseInsensitiveCompare(rhsName) == .orderedAscending
     }
   }
@@ -884,5 +1003,14 @@ extension SidebarItemGroup {
       return nil
     }
     return (translatedOffsets, translatedDestination)
+  }
+}
+
+extension SidebarState.Section {
+  /// A folder repo's custom title / color live on its synthetic folder-worktree
+  /// item (the row is a worktree row), keyed by the repo id string.
+  fileprivate func folderWorktreeItem(for repositoryID: Repository.ID) -> SidebarState.Item? {
+    let folderID = WorktreeID(repositoryID.rawValue)
+    return buckets[.pinned]?.items[folderID] ?? buckets[.unpinned]?.items[folderID]
   }
 }

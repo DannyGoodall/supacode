@@ -140,7 +140,7 @@ struct SidebarListView: View {
       switch section {
       case .repository(let repositoryID, _),
         .folder(let repositoryID, _),
-        .failedRepository(let repositoryID, _, _, _):
+        .failedRepository(let repositoryID, _, _, _, _):
         if let repoIndex = repoIDs.firstIndex(of: repositoryID) {
           repoOffsets.insert(repoIndex)
         }
@@ -158,7 +158,7 @@ struct SidebarListView: View {
       switch section {
       case .repository(let repositoryID, _),
         .folder(let repositoryID, _),
-        .failedRepository(let repositoryID, _, _, _):
+        .failedRepository(let repositoryID, _, _, _, _):
         repoDestination = repoIDs.firstIndex(of: repositoryID) ?? repoIDs.count
       case .highlight, .placeholder:
         // Dropping above the highlight prefix collapses to "before the first repo".
@@ -212,12 +212,13 @@ private struct SidebarSectionDispatcher: View {
         shortcutHintByID: shortcutHintByID
       )
       .moveDisabled(true)
-    case .failedRepository(let repositoryID, let rootURL, let customTitle, let color):
+    case .failedRepository(let repositoryID, let rootURL, let customTitle, let color, let isRemote):
       SidebarFailedRepositorySection(
         repositoryID: repositoryID,
         rootURL: rootURL,
         customTitle: customTitle,
         color: color,
+        isRemote: isRemote,
         store: store
       )
     case .folder(let repositoryID, let rowID):
@@ -242,6 +243,7 @@ private struct SidebarSectionDispatcher: View {
         SidebarGitRepositorySection(
           repository: repository,
           groups: groups,
+          hoistSummary: structure.hoistSummaryByRepositoryID[repositoryID],
           shortcutHintByID: shortcutHintByID,
           selectedWorktreeIDs: selectedWorktreeIDs,
           store: store,
@@ -255,12 +257,16 @@ private struct SidebarSectionDispatcher: View {
 private struct SidebarGitRepositorySection: View {
   let repository: Repository
   let groups: [SidebarItemGroup]
+  /// Non-nil when one or more of this repo's rows were hoisted into the
+  /// highlight sections; rendered as a muted summary line under the rows.
+  let hoistSummary: SidebarHoistSummary?
   let shortcutHintByID: [Worktree.ID: String]
   let selectedWorktreeIDs: Set<Worktree.ID>
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
   var body: some View {
     let isRemovingRepository = store.state.isRemovingRepository(repository)
+    let isResolvingRemote = store.state.resolvingRemoteRepositoryIDs.contains(repository.id)
     let section = store.state.sidebar.sections[repository.id]
     Section(isExpanded: repositoryExpansionBinding) {
       SidebarItemsView(
@@ -271,18 +277,28 @@ private struct SidebarGitRepositorySection: View {
         store: store,
         terminalManager: terminalManager
       )
+      if let hoistSummary {
+        SidebarHoistSummaryRow(
+          repositoryName: Repository.sidebarDisplayName(custom: section?.title, fallback: repository.name),
+          summary: hoistSummary,
+          store: store
+        )
+      }
     } header: {
       RepoSectionHeaderView(
         name: repository.name,
         customTitle: section?.title,
         color: section?.color,
-        isRemoving: isRemovingRepository
+        isRemoving: isRemovingRepository,
+        hostInfo: repository.host?.displayAuthority,
+        isResolving: isResolvingRemote
       )
     }
     .sectionActions {
       SidebarSectionActionsView(
         repositoryID: repository.id,
         isRemovingRepository: isRemovingRepository,
+        isRemote: repository.host != nil,
         store: store
       )
     }
@@ -298,9 +314,65 @@ private struct SidebarGitRepositorySection: View {
   }
 }
 
+/// Muted, unselectable line under a repo's rows summarizing how many were
+/// hoisted into the Pinned / Active sections, with a click that scrolls up to
+/// them. Carries no `.tag`, so it stays out of selection and arrow-key
+/// navigation; lives inside the `Section` body so it folds away when the repo
+/// section is collapsed.
+private struct SidebarHoistSummaryRow: View {
+  let repositoryName: String
+  let summary: SidebarHoistSummary
+  let store: StoreOf<RepositoriesFeature>
+
+  var body: some View {
+    Button {
+      store.send(.revealHoistedWorktreeInSidebar(summary.revealTarget))
+    } label: {
+      HStack(spacing: 8) {
+        if summary.pinnedCount > 0 {
+          SidebarHoistSummarySegment(kind: .pinned, count: summary.pinnedCount)
+        }
+        if summary.activeCount > 0 {
+          SidebarHoistSummarySegment(kind: .active, count: summary.activeCount)
+        }
+        Spacer(minLength: 0)
+      }
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .lineLimit(1)
+      .contentShape(.interaction, .rect)
+    }
+    .buttonStyle(.plain)
+    .listRowInsets(.leading, 0)
+    .listRowInsets(.trailing, 4)
+    .listRowInsets(.vertical, 4)
+    .moveDisabled(true)
+    .help("Show \(repositoryName)'s pinned and active worktrees")
+    .accessibilityLabel("\(summary.label) above. Scroll to them.")
+  }
+}
+
+/// One bucket of the hoist summary: its count followed by the same colored dot
+/// the matching highlight section header shows.
+private struct SidebarHoistSummarySegment: View {
+  let kind: SidebarStructure.HighlightKind
+  let count: Int
+
+  var body: some View {
+    HStack(spacing: 4) {
+      Text("+\(count) \(kind.summaryNoun)")
+      SidebarHighlightHeaderDot(color: kind.indicatorColor)
+    }
+  }
+}
+
 private struct SidebarSectionActionsView: View {
   let repositoryID: Repository.ID
   let isRemovingRepository: Bool
+  /// Remote (SSH) repositories hide the local-only "Repository Settings…" and
+  /// route Remove to `removeRemoteRepository` (drops the config; remote files
+  /// untouched). Worktree creation (`+`) works for remote repos too.
+  var isRemote: Bool = false
   let store: StoreOf<RepositoriesFeature>
 
   var body: some View {
@@ -310,15 +382,27 @@ private struct SidebarSectionActionsView: View {
       }
       .help("Set a custom title or color")
       .disabled(isRemovingRepository)
-      Button("Repository Settings…", systemImage: "gear") {
-        store.send(.openRepositorySettings(repositoryID))
+      if isRemote {
+        Button("Edit Connection…", systemImage: "wifi") {
+          store.send(.requestEditRemoteRepository(repositoryID))
+        }
+        .help("Edit the SSH server, port, user, or path")
+        .disabled(isRemovingRepository)
+      } else {
+        Button("Repository Settings…", systemImage: "gear") {
+          store.send(.openRepositorySettings(repositoryID))
+        }
+        .help("Repository Settings")
       }
-      .help("Repository Settings")
       Divider()
-      Button("Remove Repository…", systemImage: "folder.badge.minus", role: .destructive) {
+      Button(
+        isRemote ? "Remove Remote Repository…" : "Remove Repository…",
+        systemImage: "folder.badge.minus",
+        role: .destructive
+      ) {
         store.send(.requestDeleteRepository(repositoryID))
       }
-      .help("Remove Repository")
+      .help(isRemote ? "Remove this remote repository (remote files are untouched)" : "Remove Repository")
       .disabled(isRemovingRepository)
     } label: {
       Image(systemName: "ellipsis")
@@ -350,7 +434,14 @@ private struct SidebarFailedRepositorySection: View {
   let rootURL: URL
   let customTitle: String?
   let color: RepositoryColor?
+  /// A disconnected SSH repo: route Remove to the remote config store and offer
+  /// "Edit Connection…" to fix a bad host/path, rather than the local-roots flow.
+  let isRemote: Bool
   let store: StoreOf<RepositoriesFeature>
+
+  private func removeFailedRepository() {
+    store.send(isRemote ? .requestDeleteRepository(repositoryID) : .requestRemoveFailedRepository(repositoryID))
+  }
 
   var body: some View {
     let standardizedRootURL = rootURL.standardizedFileURL
@@ -361,7 +452,7 @@ private struct SidebarFailedRepositorySection: View {
       FailedRepositoryRow(
         name: displayName,
         path: path,
-        removeRepository: { store.send(.requestRemoveFailedRepository(repositoryID)) }
+        removeRepository: removeFailedRepository
       )
       .tag(SidebarSelection.failedRepository(repositoryID))
       .moveDisabled(true)
@@ -370,16 +461,31 @@ private struct SidebarFailedRepositorySection: View {
         name: fallbackName,
         customTitle: customTitle,
         color: color,
-        isRemoving: false
+        isRemoving: false,
+        hostInfo: store.state.repositories[id: repositoryID]?.host?.displayAuthority
       )
     }
     .sectionActions {
       // No `+`: the repo isn't loadable, so worktree create is meaningless.
       Menu {
-        Button("Remove Repository…", systemImage: "folder.badge.minus", role: .destructive) {
-          store.send(.requestRemoveFailedRepository(repositoryID))
+        if isRemote {
+          Button("Edit Connection…", systemImage: "wifi") {
+            store.send(.requestEditRemoteRepository(repositoryID))
+          }
+          .help("Edit the SSH server, port, user, or path")
         }
-        .help("Remove this repository from Supacode. Files on disk are untouched.")
+        Button(
+          isRemote ? "Remove Remote Repository…" : "Remove Repository…",
+          systemImage: "folder.badge.minus",
+          role: .destructive
+        ) {
+          removeFailedRepository()
+        }
+        .help(
+          isRemote
+            ? "Remove this remote repository (remote files are untouched)"
+            : "Remove this repository from Supacode. Files on disk are untouched."
+        )
       } label: {
         Image(systemName: "ellipsis")
           .accessibilityLabel("Options")

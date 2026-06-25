@@ -212,7 +212,7 @@ final class WorktreeTerminalManager {
 
   func listTabs(worktreeID: String) -> [[String: String]]? {
     let decoded = worktreeID.removingPercentEncoding ?? worktreeID
-    guard let state = states[decoded] else { return nil }
+    guard let state = states[WorktreeID(decoded)] else { return nil }
     let selectedTabID = state.tabManager.selectedTabId
     return state.tabManager.tabs.map { tab in
       var entry = ["id": tab.id.rawValue.uuidString]
@@ -223,7 +223,7 @@ final class WorktreeTerminalManager {
 
   func listSurfaces(worktreeID: String, tabID: String) -> [[String: String]]? {
     let decoded = worktreeID.removingPercentEncoding ?? worktreeID
-    guard let state = states[decoded],
+    guard let state = states[WorktreeID(decoded)],
       let tabUUID = UUID(uuidString: tabID)
     else { return nil }
     let terminalTabID = TerminalTabID(rawValue: tabUUID)
@@ -355,8 +355,8 @@ final class WorktreeTerminalManager {
 
   private func handleManagementCommand(_ command: TerminalClient.Command) {
     switch command {
-    case .prune(let ids):
-      prune(keeping: ids)
+    case .prune(let ids, let protectedRepositoryIDs):
+      prune(keeping: ids, protectingRepositoryIDs: protectedRepositoryIDs)
     case .setNotificationsEnabled(let enabled):
       setNotificationsEnabled(enabled)
     case .refreshTabBarVisibility:
@@ -366,11 +366,12 @@ final class WorktreeTerminalManager {
     case .setSelectedWorktreeID(let id):
       guard id != selectedWorktreeID else { return }
       if let previousID = selectedWorktreeID, let previousState = states[previousID] {
+        previousState.rememberFocusedZoom()
         previousState.setAllSurfacesOccluded()
         markLayoutDirty(worktreeID: previousID)
       }
       selectedWorktreeID = id
-      terminalLogger.info("Selected worktree \(id ?? "nil")")
+      terminalLogger.info("Selected worktree \(id?.rawValue ?? "nil")")
     case .createTab, .createTabWithInput, .ensureInitialTab, .stopRunScript, .stopScript,
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
       .performBindingActionOnSurface, .startSearch, .searchSelection, .navigateSearchNext,
@@ -537,7 +538,7 @@ final class WorktreeTerminalManager {
     let state = state(for: worktree) { runSetupScriptIfNew }
     let setupScript: String?
     if state.needsSetupScript() {
-      @SharedReader(.repositorySettings(worktree.repositoryRootURL))
+      @SharedReader(.repositorySettings(worktree.repositoryRootURL, host: worktree.host))
       var settings = RepositorySettings.default
       setupScript = settings.setupScript
     } else {
@@ -558,9 +559,15 @@ final class WorktreeTerminalManager {
     return state.closeFocusedSurface()
   }
 
-  func prune(keeping worktreeIDs: Set<Worktree.ID>) {
+  func prune(
+    keeping worktreeIDs: Set<Worktree.ID>,
+    protectingRepositoryIDs protectedRepositoryIDs: Set<Repository.ID> = []
+  ) {
+    let shouldKeep: (Worktree.ID, WorktreeTerminalState) -> Bool = { id, state in
+      worktreeIDs.contains(id) || protectedRepositoryIDs.contains(state.repositoryID)
+    }
     var removed: [(Worktree.ID, WorktreeTerminalState)] = []
-    for (id, state) in states where !worktreeIDs.contains(id) {
+    for (id, state) in states where !shouldKeep(id, state) {
       removed.append((id, state))
     }
     let prunedSurfaceIDs = Set(removed.flatMap { _, state in state.allSurfaceIDs })
@@ -582,7 +589,7 @@ final class WorktreeTerminalManager {
     if !removed.isEmpty {
       terminalLogger.info("Pruned \(removed.count) terminal state(s)")
     }
-    states = states.filter { worktreeIDs.contains($0.key) }
+    states = states.filter { shouldKeep($0.key, $0.value) }
     cancelPendingIdleHooks(forSurfaceIDs: prunedSurfaceIDs)
     for (id, _) in removed { invalidateCaches(forPrunedWorktree: id) }
     emitNotificationIndicatorCountIfNeeded()
@@ -617,7 +624,7 @@ final class WorktreeTerminalManager {
     let change: LayoutsIncrementalWriter.Change = snapshot.map { .snapshot($0) } ?? .delete
     let writer = layoutsWriter
     let task = Task { [weak self] in
-      await writer.flush([worktreeID: change])
+      await writer.flush([worktreeID.rawValue: change])
       self?.layoutFlushTasks[worktreeID] = nil
     }
     layoutFlushTasks[worktreeID] = task
@@ -638,7 +645,7 @@ final class WorktreeTerminalManager {
     // saveAllLayoutSnapshots, so no positive snapshot is re-emitted.
     let task = Task { [weak self] in
       await inflightFlush?.value
-      await writer.flush([worktreeID: .delete])
+      await writer.flush([worktreeID.rawValue: .delete])
       self?.layoutFlushTasks[worktreeID] = nil
     }
     layoutFlushTasks[worktreeID] = task
@@ -855,13 +862,19 @@ final class WorktreeTerminalManager {
     // The actor is the sole disk writer (`LayoutsKey.save` is a no-op), so the
     // on-quit terminal write goes through `flushSync` while still updating the
     // in-memory `@Shared` dict via `saveLayoutSnapshot` for any live readers.
-    var changes: [Worktree.ID: LayoutsIncrementalWriter.Change] = [:]
+    var changes: [String: LayoutsIncrementalWriter.Change] = [:]
     for (id, state) in states {
       let snapshot = state.captureLayoutSnapshot(agentsBySurface: agentsBySurface)
       saveLayoutSnapshot(id, snapshot)
-      changes[id] = snapshot.map { .snapshot($0) } ?? .delete
+      changes[id.rawValue] = snapshot.map { .snapshot($0) } ?? .delete
     }
     layoutsWriter.flushSync(changes)
+  }
+
+  /// Capture the selected worktree's zoom at quit (no switch fires then).
+  func rememberSelectedWorktreeZoomOnQuit() {
+    guard let selectedWorktreeID, let state = states[selectedWorktreeID] else { return }
+    state.rememberFocusedZoom()
   }
 
   func surfaceBackgroundColorScheme() -> ColorScheme {

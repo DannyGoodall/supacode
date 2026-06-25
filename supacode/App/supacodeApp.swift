@@ -60,6 +60,7 @@ final class SupacodeAppDelegate: NSObject, NSApplicationDelegate {
     terminalManager?.cancelPendingLayoutSaves()
     let agentsBySurface = appStore?.state.agentPresence.agentsBySurface() ?? [:]
     terminalManager?.saveAllLayoutSnapshots(agentsBySurface: agentsBySurface)
+    terminalManager?.rememberSelectedWorktreeZoomOnQuit()
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -148,7 +149,17 @@ struct SupacodeApp: App {
     // re-upgrade path can't double-migrate, while a prior
     // half-finished migration that left a `schemaVersion == 0` file
     // still gets retried.
-    SidebarPersistenceMigrator.migrateIfNeeded()
+    // Snapshot settings.json + sidebar.json before any migration or @Shared hydration
+    // can rewrite them, so a botched migration or downgrade is recoverable by hand.
+    SidebarPersistenceMigrator.backupBeforeRemoteIdentityMigration()
+    // Capture the retired `global.remoteRepositories` before any migration can
+    // re-encode settings and drop the field. An unreadable settings.json skips
+    // both passes this launch (a save would strip it first); they retry next launch.
+    let capturedLegacyRemotes = SidebarPersistenceMigrator.captureLegacyRemoteRoots()
+    if capturedLegacyRemotes != .unreadable {
+      SidebarPersistenceMigrator.migrateIfNeeded()
+      SidebarPersistenceMigrator.migrateRemoteIdentityIfNeeded(capturedLegacy: capturedLegacyRemotes)
+    }
     @Shared(.settingsFile) var settingsFile
     let initialSettings = settingsFile.global
     let infoDictionary = Bundle.main.infoDictionary ?? [:]
@@ -197,15 +208,15 @@ struct SupacodeApp: App {
       @Shared(.layouts) var layouts: [String: TerminalLayoutSnapshot] = [:]
       $layouts.withLock { dict in
         if let snapshot {
-          dict[worktreeID] = snapshot
+          dict[worktreeID.rawValue] = snapshot
         } else {
-          dict.removeValue(forKey: worktreeID)
+          dict.removeValue(forKey: worktreeID.rawValue)
         }
       }
     }
     terminalManager.loadLayoutSnapshot = { worktreeID in
       @SharedReader(.layouts) var layouts: [String: TerminalLayoutSnapshot] = [:]
-      return layouts[worktreeID]
+      return layouts[worktreeID.rawValue]
     }
     return terminalManager
   }
@@ -335,13 +346,14 @@ struct SupacodeApp: App {
     switch resource {
     case "repos":
       let data = repos.map {
-        ["id": $0.id.addingPercentEncoding(withAllowedCharacters: pctSet) ?? $0.id]
+        ["id": $0.id.rawValue.addingPercentEncoding(withAllowedCharacters: pctSet) ?? $0.id.rawValue]
       }
       AgentHookSocketServer.sendQueryResponse(clientFD: clientFD, data: data)
     case "worktrees":
       let data = repos.flatMap { repo in
         repo.worktrees.map { worktree in
-          let encodedID = worktree.id.addingPercentEncoding(withAllowedCharacters: pctSet) ?? worktree.id
+          let encodedID =
+            worktree.id.rawValue.addingPercentEncoding(withAllowedCharacters: pctSet) ?? worktree.id.rawValue
           var entry = ["id": encodedID]
           if worktree.id == selectedWorktreeID { entry["focused"] = "1" }
           return entry
@@ -357,7 +369,7 @@ struct SupacodeApp: App {
       let tabs = terminalManager.listTabs(worktreeID: worktreeID)
       if tabs == nil {
         let decoded = worktreeID.removingPercentEncoding ?? worktreeID
-        let worktreeExists = repos.contains { $0.worktrees.contains { $0.id == decoded } }
+        let worktreeExists = repos.contains { $0.worktrees.contains { $0.id.rawValue == decoded } }
         guard worktreeExists else {
           AgentHookSocketServer.sendCommandResponse(
             clientFD: clientFD, ok: false, error: "Worktree not found: \(worktreeID)")
@@ -388,14 +400,14 @@ struct SupacodeApp: App {
       // accept both forms — matching the deeplink reducer's resolveWorktreeID.
       let allWorktrees = repos.flatMap(\.worktrees)
       let worktree =
-        allWorktrees.first(where: { $0.id == decoded })
-        ?? allWorktrees.first(where: { $0.id == decoded + "/" })
+        allWorktrees.first(where: { $0.id.rawValue == decoded })
+        ?? allWorktrees.first(where: { $0.id.rawValue == decoded + "/" })
       guard let worktree else {
         AgentHookSocketServer.sendCommandResponse(
           clientFD: clientFD, ok: false, error: "Worktree not found: \(worktreeID)")
         return
       }
-      @SharedReader(.repositorySettings(worktree.repositoryRootURL)) var settings
+      @SharedReader(.repositorySettings(worktree.repositoryRootURL, host: worktree.host)) var settings
       @SharedReader(.settingsFile) var settingsFile
       let runningIDs: Set<UUID> =
         store.repositories.sidebarItems[id: worktree.id]

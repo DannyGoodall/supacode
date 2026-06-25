@@ -1,5 +1,45 @@
 import AppKit
 
+public enum OpenTarget: Equatable, Sendable {
+  case workingDirectory
+  case url(URL)
+  case search(String, excludeDirectories: String? = nil, maxDepth: Int = 3)
+
+  public static let `default`: Self = .workingDirectory
+}
+
+public enum OpenBehavior: Equatable, Sendable {
+  public struct WorkspaceConfiguration: Equatable, Sendable {
+    public var createsNewApplicationInstance: Bool
+    public var arguments: [Argument]
+
+    public init(
+      createsNewApplicationInstance: Bool = false,
+      arguments: [Argument] = []
+    ) {
+      self.createsNewApplicationInstance = createsNewApplicationInstance
+      self.arguments = arguments
+    }
+  }
+
+  public enum ProcessExecutable: Equatable, Sendable {
+    case path(String)
+    case appRelativePath(String)
+  }
+
+  public enum Argument: Equatable, Sendable {
+    case literal(String)
+    case appPath
+    case targetPath
+    case targetURL
+  }
+
+  case workspace(configuration: WorkspaceConfiguration? = nil)
+  case process(ProcessExecutable, args: [Argument])
+
+  public static let `default`: Self = .workspace(configuration: nil)
+}
+
 public enum OpenWorktreeAction: CaseIterable, Identifiable {
   public enum MenuIcon {
     case app(NSImage)
@@ -17,6 +57,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
   case gitkraken
   case gitup
   case ghostty
+  case goland
   case intellij
   case kitty
   case pycharm
@@ -35,6 +76,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
   case windsurf
   case xcode
   case zed
+  case zedPreview
 
   public var id: String { title }
 
@@ -50,6 +92,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .gitkraken: "GitKraken"
     case .gitup: "GitUp"
     case .ghostty: "Ghostty"
+    case .goland: "GoLand"
     case .intellij: "IntelliJ IDEA"
     case .kitty: "Kitty"
     case .pycharm: "PyCharm"
@@ -69,6 +112,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .xcode: "Xcode"
     case .fork: "Fork"
     case .zed: "Zed"
+    case .zedPreview: "Zed Preview"
     }
   }
 
@@ -77,9 +121,9 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .finder: "Finder"
     case .editor: "$EDITOR"
     case .alacritty, .androidStudio, .antigravity, .cursor, .fork, .githubDesktop, .gitkraken,
-      .gitup, .ghostty, .intellij, .kitty, .pycharm, .rubymine, .rustrover, .smartgit,
+      .gitup, .ghostty, .goland, .intellij, .kitty, .pycharm, .rubymine, .rustrover, .smartgit,
       .sourcetree, .sublimeMerge, .terminal, .vscode, .vscodeInsiders, .vscodium, .warp,
-      .webstorm, .wezterm, .windsurf, .xcode, .zed:
+      .webstorm, .wezterm, .windsurf, .xcode, .zed, .zedPreview:
       title
     }
   }
@@ -100,9 +144,9 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .finder, .editor:
       return true
     case .alacritty, .androidStudio, .antigravity, .cursor, .fork, .githubDesktop, .gitkraken,
-      .gitup, .ghostty, .intellij, .kitty, .pycharm, .rubymine, .rustrover, .smartgit,
+      .gitup, .ghostty, .goland, .intellij, .kitty, .pycharm, .rubymine, .rustrover, .smartgit,
       .sourcetree, .sublimeMerge, .terminal, .vscode, .vscodeInsiders, .vscodium, .warp,
-      .webstorm, .wezterm, .windsurf, .xcode, .zed:
+      .webstorm, .wezterm, .windsurf, .xcode, .zed, .zedPreview:
       return NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) != nil
     }
   }
@@ -120,6 +164,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .gitkraken: "gitkraken"
     case .gitup: "gitup"
     case .ghostty: "ghostty"
+    case .goland: "goland"
     case .intellij: "intellij"
     case .kitty: "kitty"
     case .pycharm: "pycharm"
@@ -138,6 +183,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .windsurf: "windsurf"
     case .xcode: "xcode"
     case .zed: "zed"
+    case .zedPreview: "zed-preview"
     }
   }
 
@@ -154,6 +200,7 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .gitkraken: "com.axosoft.gitkraken"
     case .gitup: "co.gitup.mac"
     case .ghostty: "com.mitchellh.ghostty"
+    case .goland: "com.jetbrains.goland"
     case .intellij: "com.jetbrains.intellij"
     case .kitty: "net.kovidgoyal.kitty"
     case .pycharm: "com.jetbrains.pycharm"
@@ -172,6 +219,50 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
     case .windsurf: "com.exafunction.windsurf"
     case .xcode: "com.apple.dt.Xcode"
     case .zed: "dev.zed.Zed"
+    case .zedPreview: "dev.zed.Zed-Preview"
+    }
+  }
+
+  public var openTargets: [OpenTarget] {
+    switch self {
+    case .xcode:
+      [
+        .search(#"\.xcworkspace$"#, excludeDirectories: Self.xcodeSearchExcludedDirectories),
+        .search(#"\.xcodeproj$"#, excludeDirectories: Self.xcodeSearchExcludedDirectories),
+        .default,
+      ]
+    case .alacritty, .androidStudio, .antigravity, .cursor, .editor, .finder, .fork, .githubDesktop,
+      .gitkraken, .gitup, .ghostty, .goland, .intellij, .kitty, .pycharm, .rubymine, .rustrover,
+      .smartgit, .sourcetree, .sublimeMerge, .terminal, .vscode, .vscodeInsiders, .vscodium, .warp,
+      .webstorm, .wezterm, .windsurf, .zed, .zedPreview:
+      [.default]
+    }
+  }
+
+  public var openBehaviors: [OpenBehavior] {
+    switch self {
+    case .androidStudio, .goland, .intellij, .webstorm, .pycharm, .rubymine, .rustrover:
+      [
+        .workspace(
+          configuration:
+            .init(
+              createsNewApplicationInstance: true,
+              arguments: [.targetPath]
+            )
+        )
+      ]
+    case .zed, .zedPreview:
+      [
+        .process(
+          .appRelativePath("Contents/MacOS/cli"),
+          args: [.targetPath]
+        ),
+        .default,
+      ]
+    case .alacritty, .antigravity, .cursor, .editor, .finder, .fork, .githubDesktop, .gitkraken, .gitup,
+      .ghostty, .kitty, .smartgit, .sourcetree, .sublimeMerge, .terminal, .vscode, .vscodeInsiders,
+      .vscodium, .warp, .wezterm, .windsurf, .xcode:
+      [.default]
     }
   }
 
@@ -180,11 +271,13 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
   public static let editorPriority: [OpenWorktreeAction] = [
     .cursor,
     .zed,
+    .zedPreview,
     .vscode,
     .windsurf,
     .vscodeInsiders,
     .vscodium,
     .androidStudio,
+    .goland,
     .intellij,
     .webstorm,
     .pycharm,
@@ -255,4 +348,11 @@ public enum OpenWorktreeAction: CaseIterable, Identifiable {
   public static func preferredDefault() -> OpenWorktreeAction {
     defaultPriority.first(where: \.isInstalled) ?? .finder
   }
+
+  private static let xcodeSearchExcludedDirectories =
+    #"(^|/)("#
+    + #"\.build|\.dart_tool|\.expo|\.expo-shared|\.git|\.gradle|\.pnpm-store"#
+    + #"|\.swiftpm|\.symlinks|\.yarn|Carthage|DerivedData|Pods|build|node_modules"#
+    + #"|[^/]+\.xcodeproj|[^/]+\.xcworkspace"#
+    + #")(/|$)"#
 }

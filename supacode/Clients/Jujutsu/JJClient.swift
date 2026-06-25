@@ -46,18 +46,16 @@ struct JJClient {
       let head = await headInfo(named: name, repoRoot: repositoryRootURL)
       let isAttached = !head.bookmark.isEmpty
       let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: workspaceURL)
-      let id = workspaceURL.path(percentEncoded: false)
       let resourceValues = try? workspaceURL.resourceValues(forKeys: [
         .creationDateKey, .contentModificationDateKey,
       ])
       let createdAt = resourceValues?.creationDate ?? resourceValues?.contentModificationDate
       worktrees.append(
         Worktree(
-          id: id,
+          location: .local(workingDirectory: workspaceURL, repositoryRoot: repositoryRootURL),
+          kind: .git,
           name: isAttached ? head.bookmark : name,
           detail: detail,
-          workingDirectory: workspaceURL,
-          repositoryRootURL: repositoryRootURL,
           createdAt: createdAt,
           isMissing: false,
           isAttached: isAttached,
@@ -269,11 +267,10 @@ struct JJClient {
     let detail = WorktreeTextFormatting.relativePath(from: repositoryRootURL, to: canonicalURL)
     let createdAt = try? canonicalURL.resourceValues(forKeys: [.creationDateKey]).creationDate
     return Worktree(
-      id: canonicalURL.path(percentEncoded: false),
+      location: .local(workingDirectory: canonicalURL, repositoryRoot: repositoryRootURL),
+      kind: .git,
       name: name,
       detail: detail,
-      workingDirectory: canonicalURL,
-      repositoryRootURL: repositoryRootURL,
       createdAt: createdAt,
       isMissing: false,
       isAttached: true,

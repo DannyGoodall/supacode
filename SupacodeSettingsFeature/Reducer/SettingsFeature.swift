@@ -255,9 +255,7 @@ public struct SettingsFeature {
           var updatedSettings = settings
           updatedSettings.defaultEditorID = normalizedDefaultEditorID
           updatedSettings.defaultWorktreeBaseDirectoryPath = normalizedWorktreeBaseDirPath
-          normalizedSettings = updatedSettings
-          @Shared(.settingsFile) var settingsFile
-          $settingsFile.withLock { $0.global = normalizedSettings }
+          normalizedSettings = persistGlobalSettings(updatedSettings)
         }
         state.appearanceMode = normalizedSettings.appearanceMode
         state.defaultEditorID = normalizedSettings.defaultEditorID
@@ -580,13 +578,20 @@ public struct SettingsFeature {
   }
 
   private func persist(_ state: State) -> Effect<Action> {
-    let settings = state.globalSettings
-    @Shared(.settingsFile) var settingsFile
-    $settingsFile.withLock { $0.global = settings }
+    let settings = persistGlobalSettings(state.globalSettings)
     if settings.analyticsEnabled {
       analyticsClient.capture("settings_changed", nil)
     }
     return .send(.delegate(.settingsChanged(settings)))
+  }
+
+  @discardableResult
+  private func persistGlobalSettings(_ settings: GlobalSettings) -> GlobalSettings {
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock {
+      $0.global = settings
+    }
+    return settings
   }
 
   private func synchronizeRepositorySelection(for state: inout State) {
@@ -603,10 +608,15 @@ public struct SettingsFeature {
       state.repositorySettings = nil
       return
     }
-    if state.repositorySettings?.rootURL != summary.rootURL {
-      @Shared(.repositorySettings(summary.rootURL)) var repositorySettings
+    // Compare on host too: two remote hosts at the same path share a `rootURL`
+    // but are distinct repositories, so a path-only check would keep stale state.
+    if state.repositorySettings?.rootURL != summary.rootURL
+      || state.repositorySettings?.host != summary.host
+    {
+      @Shared(.repositorySettings(summary.rootURL, host: summary.host)) var repositorySettings
       state.repositorySettings = RepositorySettingsFeature.State(
         rootURL: summary.rootURL,
+        host: summary.host,
         isGitRepository: summary.isGitRepository,
         isColocatedJJ: summary.isColocatedJJ,
         settings: repositorySettings

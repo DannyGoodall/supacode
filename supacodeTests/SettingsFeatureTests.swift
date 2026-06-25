@@ -134,6 +134,48 @@ struct SettingsFeatureTests {
     #expect(settingsFile.global.systemNotificationsEnabled == true)
   }
 
+  @Test(.dependencies) func settingsPersistDoesNotTouchRemoteRepositoryRoots() async {
+    let remote = TestRemoteRepo(host: RemoteHost(alias: "devbox"), remotePath: "/home/me/proj")
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.remoteRepositoryRoots = [remote.id.rawValue] }
+
+    let store = TestStore(initialState: SettingsFeature.State()) {
+      SettingsFeature()
+    }
+
+    await store.send(.binding(.set(\.appearanceMode, .light))) {
+      $0.appearanceMode = .light
+    }
+    await store.receive(\.delegate.settingsChanged)
+
+    #expect(settingsFile.global.appearanceMode == .light)
+    #expect(settingsFile.remoteRepositoryRoots == [remote.id.rawValue])
+  }
+
+  @Test(.dependencies) func settingsLoadedNormalizationDoesNotTouchRemoteRepositoryRoots() async {
+    let remote = TestRemoteRepo(host: RemoteHost(alias: "devbox"), remotePath: "/home/me/proj")
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.remoteRepositoryRoots = [remote.id.rawValue] }
+
+    var loaded = GlobalSettings.default
+    loaded.defaultWorktreeBaseDirectoryPath = " ~/worktrees "
+    let expectedPath = FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: "worktrees", directoryHint: .isDirectory)
+      .standardizedFileURL
+      .path(percentEncoded: false)
+    let store = TestStore(initialState: SettingsFeature.State()) {
+      SettingsFeature()
+    }
+
+    await store.send(.settingsLoaded(loaded)) {
+      $0.defaultWorktreeBaseDirectoryPath = expectedPath
+    }
+    await store.receive(\.delegate.settingsChanged)
+
+    #expect(settingsFile.global.defaultWorktreeBaseDirectoryPath == expectedPath)
+    #expect(settingsFile.remoteRepositoryRoots == [remote.id.rawValue])
+  }
+
   @Test(.dependencies) func selectionBuildsRepositorySettingsFromRepositorySummary() async {
     let summary = SettingsRepositorySummary(id: "/tmp/repo", name: "Repo")
     let store = TestStore(initialState: SettingsFeature.State()) {

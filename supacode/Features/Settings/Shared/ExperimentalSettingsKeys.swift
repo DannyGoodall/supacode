@@ -14,7 +14,7 @@ nonisolated extension SharedReaderKey where Self == AppStorageKey<Bool>.Default 
   /// orchestrator until the user turns it on. While off, the repository
   /// loader classifies a colocated git+jj root as a plain `.git`
   /// repository (identical to historical behavior), so nothing
-  /// downstream sees the new `.gitColocatedJJ` flavor.
+  /// downstream sees the `isColocatedJJ` flavor.
   static var experimentalJJIntegration: Self {
     Self[.appStorage("experimentalJJIntegration"), default: false]
   }

@@ -20,7 +20,7 @@ struct SidebarStructureTests {
 
   private func makeWorktree(id: String, name: String, repoRoot: URL) -> Worktree {
     Worktree(
-      id: id,
+      id: WorktreeID(id),
       name: name,
       detail: "",
       workingDirectory: URL(fileURLWithPath: id),
@@ -30,7 +30,7 @@ struct SidebarStructureTests {
 
   private func makeMainWorktree(repoRoot: URL) -> Worktree {
     Worktree(
-      id: repoRoot.path(percentEncoded: false),
+      id: WorktreeID(repoRoot.path(percentEncoded: false)),
       name: "main",
       detail: "",
       workingDirectory: repoRoot,
@@ -68,7 +68,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let feature = makeWorktree(id: "/tmp/repo/wt", name: "feature", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, feature])
@@ -91,7 +91,7 @@ struct SidebarStructureTests {
     let repoRoot = URL(fileURLWithPath: "/tmp/repo")
     let main = makeMainWorktree(repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main])
@@ -124,7 +124,7 @@ struct SidebarStructureTests {
     let pinned = makeWorktree(id: "/tmp/repo/pinned", name: "pinned", repoRoot: repoRoot)
     let extra = makeWorktree(id: "/tmp/repo/extra", name: "extra", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, pinned, extra])
@@ -157,7 +157,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let duplicate = makeWorktree(id: "/tmp/repo/dup", name: "duplicate", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, duplicate])
@@ -193,7 +193,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let archived = makeWorktree(id: "/tmp/repo/arch", name: "arch", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, archived])
@@ -243,7 +243,7 @@ struct SidebarStructureTests {
     let unpinX = makeWorktree(id: "/tmp/repo/x", name: "x-branch", repoRoot: repoRoot)
     let unpinB = makeWorktree(id: "/tmp/repo/b", name: "b-branch", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, charlie, alpha, bravo, unpinB, unpinX])
@@ -265,7 +265,7 @@ struct SidebarStructureTests {
       sidebar.sections[repository.id] = section
     }
     for id in [alpha.id, bravo.id, charlie.id, unpinX.id, unpinB.id] {
-      let name = state.sidebarItems[id: id]?.name ?? id
+      let name = state.sidebarItems[id: id]?.name ?? id.rawValue
       state.sidebarItems[id: id]?.branchName = name
     }
     state.reconcileSidebarForTesting()
@@ -290,7 +290,7 @@ struct SidebarStructureTests {
     let charlie = makeWorktree(id: "/tmp/repo/charlie", name: "charlie", repoRoot: repoRoot)
     let alpha = makeWorktree(id: "/tmp/repo/alpha", name: "alpha", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, charlie, alpha])
@@ -328,7 +328,7 @@ struct SidebarStructureTests {
     let alpha = makeWorktree(id: "/tmp/repo/alpha", name: "alpha", repoRoot: repoRoot)
     let bravo = makeWorktree(id: "/tmp/repo/bravo", name: "bravo", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, charlie, alpha, bravo])
@@ -349,7 +349,7 @@ struct SidebarStructureTests {
       sidebar.sections[repository.id] = section
     }
     for id in [alpha.id, bravo.id, charlie.id] {
-      let name = state.sidebarItems[id: id]?.name ?? id
+      let name = state.sidebarItems[id: id]?.name ?? id.rawValue
       state.sidebarItems[id: id]?.branchName = name
     }
     state.$sidebarNestWorktreesByBranch.withLock { $0 = true }
@@ -377,7 +377,7 @@ struct SidebarStructureTests {
     let busy = makeWorktree(id: "/tmp/repo/busy", name: "busy", repoRoot: repoRoot)
     let idle = makeWorktree(id: "/tmp/repo/idle", name: "idle", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, busy, idle])
@@ -412,7 +412,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let archived = makeWorktree(id: "/tmp/repo/archived", name: "archived", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, archived])
@@ -438,21 +438,21 @@ struct SidebarStructureTests {
     let repoRoot = URL(fileURLWithPath: "/tmp/repo")
     let main = makeMainWorktree(repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main])
     )
     var state = makeState(repositories: [repository])
     let failedRoot = URL(fileURLWithPath: "/tmp/broken")
-    let failedID = failedRoot.path(percentEncoded: false)
+    let failedID = RepositoryID(failedRoot.path(percentEncoded: false))
     state.repositoryRoots.append(failedRoot)
     state.loadFailuresByID[failedID] = "boom"
 
     let structure = state.computeSidebarStructure(groupPinned: false, groupActive: false)
 
     let failedIndex = structure.sections.firstIndex {
-      if case .failedRepository(let id, _, _, _) = $0 { return id == failedID }
+      if case .failedRepository(let id, _, _, _, _) = $0 { return id == failedID }
       return false
     }
     let repoIndex = structure.sections.firstIndex {
@@ -471,7 +471,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let busy = makeWorktree(id: "/tmp/repo/busy", name: "busy", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "raw-folder-name",
       worktrees: IdentifiedArray(uniqueElements: [main, busy])
@@ -495,7 +495,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let busy = makeWorktree(id: "/tmp/repo/busy", name: "busy", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "fallback-name",
       worktrees: IdentifiedArray(uniqueElements: [main, busy])
@@ -518,7 +518,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let archiving = makeWorktree(id: "/tmp/repo/archiving", name: "archiving", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, archiving])
@@ -542,7 +542,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let deleting = makeWorktree(id: "/tmp/repo/deleting", name: "deleting", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, deleting])
@@ -565,7 +565,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let pending = makeWorktree(id: "/tmp/repo/pending", name: "pending", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, pending])
@@ -590,7 +590,7 @@ struct SidebarStructureTests {
     let main = makeMainWorktree(repoRoot: repoRoot)
     let other = makeWorktree(id: "/tmp/repo/other", name: "other", repoRoot: repoRoot)
     let repository = Repository(
-      id: repoRoot.path(percentEncoded: false),
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
       rootURL: repoRoot,
       name: "repo",
       worktrees: IdentifiedArray(uniqueElements: [main, other])
@@ -624,7 +624,7 @@ struct SidebarStructureTests {
     let folderURL = URL(fileURLWithPath: "/tmp/folder")
     let folderID = Repository.folderWorktreeID(for: folderURL)
     let folderRepo = Repository(
-      id: folderURL.path(percentEncoded: false),
+      id: RepositoryID(folderURL.path(percentEncoded: false)),
       rootURL: folderURL,
       name: "folder",
       worktrees: IdentifiedArray(
@@ -665,11 +665,245 @@ struct SidebarStructureTests {
     #expect(!hasFolderSection)
   }
 
+  // MARK: - Hoist summary.
+
+  @Test func hoistSummaryCountsPinnedAndActiveWithPinnedFirstTarget() {
+    let repoRoot = URL(fileURLWithPath: "/tmp/repo")
+    let main = makeMainWorktree(repoRoot: repoRoot)
+    let pinned = makeWorktree(id: "/tmp/repo/pinned", name: "pinned", repoRoot: repoRoot)
+    let busy = makeWorktree(id: "/tmp/repo/busy", name: "busy", repoRoot: repoRoot)
+    let repository = Repository(
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
+      rootURL: repoRoot,
+      name: "repo",
+      worktrees: IdentifiedArray(uniqueElements: [main, pinned, busy])
+    )
+    var state = makeState(repositories: [repository])
+    state.$sidebar.withLock { sidebar in
+      var section = sidebar.sections[repository.id] ?? .init()
+      var pinnedBucket = section.buckets[.pinned] ?? .init()
+      pinnedBucket.items[pinned.id] = .init()
+      section.buckets[.pinned] = pinnedBucket
+      sidebar.sections[repository.id] = section
+    }
+    state.sidebarItems[id: busy.id]?.runningScripts.append(.init(id: UUID(), tint: .blue))
+
+    let structure = state.computeSidebarStructure(groupPinned: true, groupActive: true)
+
+    let summary = structure.hoistSummaryByRepositoryID[repository.id]
+    #expect(summary?.pinnedCount == 1)
+    #expect(summary?.activeCount == 1)
+    // Pinned-first: the click target is the pinned hoist, not the active one.
+    #expect(summary?.revealTarget == pinned.id)
+    #expect(summary?.label == "+1 pinned, +1 active")
+  }
+
+  @Test func hoistSummaryFallsBackToActiveTargetWhenNoPinned() {
+    let repoRoot = URL(fileURLWithPath: "/tmp/repo")
+    let main = makeMainWorktree(repoRoot: repoRoot)
+    let busy = makeWorktree(id: "/tmp/repo/busy", name: "busy", repoRoot: repoRoot)
+    let repository = Repository(
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
+      rootURL: repoRoot,
+      name: "repo",
+      worktrees: IdentifiedArray(uniqueElements: [main, busy])
+    )
+    var state = makeState(repositories: [repository])
+    state.sidebarItems[id: busy.id]?.runningScripts.append(.init(id: UUID(), tint: .blue))
+
+    let structure = state.computeSidebarStructure(groupPinned: true, groupActive: true)
+
+    let summary = structure.hoistSummaryByRepositoryID[repository.id]
+    #expect(summary?.pinnedCount == 0)
+    #expect(summary?.activeCount == 1)
+    #expect(summary?.revealTarget == busy.id)
+    #expect(summary?.label == "+1 active")
+  }
+
+  @Test func hoistSummaryOmittedForRepoWithNoHoists() {
+    let repoRoot = URL(fileURLWithPath: "/tmp/repo")
+    let main = makeMainWorktree(repoRoot: repoRoot)
+    let idle = makeWorktree(id: "/tmp/repo/idle", name: "idle", repoRoot: repoRoot)
+    let repository = Repository(
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
+      rootURL: repoRoot,
+      name: "repo",
+      worktrees: IdentifiedArray(uniqueElements: [main, idle])
+    )
+    let state = makeState(repositories: [repository])
+
+    let structure = state.computeSidebarStructure(groupPinned: true, groupActive: true)
+
+    #expect(structure.hoistSummaryByRepositoryID[repository.id] == nil)
+  }
+
+  @Test func hoistSummaryExcludesFolders() {
+    let folderURL = URL(fileURLWithPath: "/tmp/folder")
+    let folderID = Repository.folderWorktreeID(for: folderURL)
+    let folderRepo = Repository(
+      id: RepositoryID(folderURL.path(percentEncoded: false)),
+      rootURL: folderURL,
+      name: "folder",
+      worktrees: IdentifiedArray(
+        uniqueElements: [
+          Worktree(
+            id: folderID,
+            name: "folder",
+            detail: "",
+            workingDirectory: folderURL,
+            repositoryRootURL: folderURL
+          )
+        ]
+      ),
+      isGitRepository: false
+    )
+    var state = makeState(repositories: [folderRepo])
+    state.$sidebar.withLock { sidebar in
+      var section = sidebar.sections[folderRepo.id] ?? .init()
+      var pinnedBucket = section.buckets[.pinned] ?? .init()
+      pinnedBucket.items[folderID] = .init()
+      section.buckets[.pinned] = pinnedBucket
+      section.buckets[.unpinned]?.items.removeValue(forKey: folderID)
+      sidebar.sections[folderRepo.id] = section
+    }
+
+    let structure = state.computeSidebarStructure(groupPinned: true, groupActive: false)
+
+    // The folder row is hoisted (so it carries a highlight tag) but a single-row
+    // folder gets no summary: its row stays fully visible at the top.
+    #expect(structure.hoistedRowIDs.contains(folderID))
+    #expect(structure.hoistSummaryByRepositoryID[folderRepo.id] == nil)
+  }
+
+  @Test func hoistSummaryCountsGitMainHoistedIntoActive() {
+    let repoRoot = URL(fileURLWithPath: "/tmp/repo")
+    let main = makeMainWorktree(repoRoot: repoRoot)
+    let repository = Repository(
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
+      rootURL: repoRoot,
+      name: "repo",
+      worktrees: IdentifiedArray(uniqueElements: [main])
+    )
+    var state = makeState(repositories: [repository])
+    state.sidebarItems[id: main.id]?.runningScripts.append(.init(id: UUID(), tint: .blue))
+
+    let structure = state.computeSidebarStructure(groupPinned: true, groupActive: true)
+
+    let summary = structure.hoistSummaryByRepositoryID[repository.id]
+    #expect(summary?.activeCount == 1)
+    #expect(summary?.pinnedCount == 0)
+    #expect(summary?.revealTarget == main.id)
+    // The repository section is still emitted (header + summary line), with no
+    // per-repo rows since main was hoisted.
+    let repoGroups = structure.sections.compactMap { section -> [SidebarItemGroup]? in
+      if case .repository(let id, let groups) = section, id == repository.id { return groups }
+      return nil
+    }.flatMap { $0 }
+    #expect(repoGroups.allSatisfy { $0.rowIDs.isEmpty })
+  }
+
+  @Test func hoistSummaryKeepsEachRepoTallyIndependent() {
+    let rootA = URL(fileURLWithPath: "/tmp/repo-a")
+    let rootB = URL(fileURLWithPath: "/tmp/repo-b")
+    let mainA = makeMainWorktree(repoRoot: rootA)
+    let mainB = makeMainWorktree(repoRoot: rootB)
+    let pinnedA = makeWorktree(id: "/tmp/repo-a/p", name: "pa", repoRoot: rootA)
+    let pinnedB = makeWorktree(id: "/tmp/repo-b/p", name: "pb", repoRoot: rootB)
+    let repoA = Repository(
+      id: RepositoryID(rootA.path(percentEncoded: false)),
+      rootURL: rootA,
+      name: "repo-a",
+      worktrees: IdentifiedArray(uniqueElements: [mainA, pinnedA])
+    )
+    let repoB = Repository(
+      id: RepositoryID(rootB.path(percentEncoded: false)),
+      rootURL: rootB,
+      name: "repo-b",
+      worktrees: IdentifiedArray(uniqueElements: [mainB, pinnedB])
+    )
+    var state = makeState(repositories: [repoA, repoB])
+    state.$sidebar.withLock { sidebar in
+      for (repoID, pinnedID) in [(repoA.id, pinnedA.id), (repoB.id, pinnedB.id)] {
+        var section = sidebar.sections[repoID] ?? .init()
+        var pinnedBucket = section.buckets[.pinned] ?? .init()
+        pinnedBucket.items[pinnedID] = .init()
+        section.buckets[.pinned] = pinnedBucket
+        sidebar.sections[repoID] = section
+      }
+    }
+
+    let structure = state.computeSidebarStructure(groupPinned: true, groupActive: false)
+
+    #expect(structure.hoistSummaryByRepositoryID[repoA.id]?.revealTarget == pinnedA.id)
+    #expect(structure.hoistSummaryByRepositoryID[repoB.id]?.revealTarget == pinnedB.id)
+    #expect(structure.hoistSummaryByRepositoryID[repoA.id]?.pinnedCount == 1)
+    #expect(structure.hoistSummaryByRepositoryID[repoB.id]?.pinnedCount == 1)
+  }
+
+  @Test func hoistSummaryTalliesMultipleRowsPerBucket() {
+    let repoRoot = URL(fileURLWithPath: "/tmp/repo")
+    let main = makeMainWorktree(repoRoot: repoRoot)
+    let pin1 = makeWorktree(id: "/tmp/repo/pin1", name: "pin1", repoRoot: repoRoot)
+    let pin2 = makeWorktree(id: "/tmp/repo/pin2", name: "pin2", repoRoot: repoRoot)
+    let busy1 = makeWorktree(id: "/tmp/repo/busy1", name: "busy1", repoRoot: repoRoot)
+    let busy2 = makeWorktree(id: "/tmp/repo/busy2", name: "busy2", repoRoot: repoRoot)
+    let repository = Repository(
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
+      rootURL: repoRoot,
+      name: "repo",
+      worktrees: IdentifiedArray(uniqueElements: [main, pin1, pin2, busy1, busy2])
+    )
+    var state = makeState(repositories: [repository])
+    state.$sidebar.withLock { sidebar in
+      var section = sidebar.sections[repository.id] ?? .init()
+      var pinnedBucket = section.buckets[.pinned] ?? .init()
+      pinnedBucket.items[pin1.id] = .init()
+      pinnedBucket.items[pin2.id] = .init()
+      section.buckets[.pinned] = pinnedBucket
+      sidebar.sections[repository.id] = section
+    }
+    state.sidebarItems[id: busy1.id]?.runningScripts.append(.init(id: UUID(), tint: .blue))
+    state.sidebarItems[id: busy2.id]?.runningScripts.append(.init(id: UUID(), tint: .blue))
+
+    let structure = state.computeSidebarStructure(groupPinned: true, groupActive: true)
+
+    let summary = structure.hoistSummaryByRepositoryID[repository.id]
+    #expect(summary?.pinnedCount == 2)
+    #expect(summary?.activeCount == 2)
+    #expect(summary?.label == "+2 pinned, +2 active")
+  }
+
+  @Test func hoistSummaryLabelOmitsActiveBucketWhenPinnedOnly() {
+    let repoRoot = URL(fileURLWithPath: "/tmp/repo")
+    let main = makeMainWorktree(repoRoot: repoRoot)
+    let pinned = makeWorktree(id: "/tmp/repo/pinned", name: "pinned", repoRoot: repoRoot)
+    let repository = Repository(
+      id: RepositoryID(repoRoot.path(percentEncoded: false)),
+      rootURL: repoRoot,
+      name: "repo",
+      worktrees: IdentifiedArray(uniqueElements: [main, pinned])
+    )
+    var state = makeState(repositories: [repository])
+    state.$sidebar.withLock { sidebar in
+      var section = sidebar.sections[repository.id] ?? .init()
+      var pinnedBucket = section.buckets[.pinned] ?? .init()
+      pinnedBucket.items[pinned.id] = .init()
+      section.buckets[.pinned] = pinnedBucket
+      sidebar.sections[repository.id] = section
+    }
+
+    let structure = state.computeSidebarStructure(groupPinned: true, groupActive: true)
+
+    let summary = structure.hoistSummaryByRepositoryID[repository.id]
+    #expect(summary?.activeCount == 0)
+    #expect(summary?.label == "+1 pinned")
+  }
+
   // MARK: - SidebarItemGroup.translateFilteredMove.
 
   @Test func translateFilteredMoveMapsAcrossHoistedRows() {
-    let full = ["a", "b", "c", "d", "e"]
-    let visible = ["a", "b", "d", "e"]  // c is hoisted.
+    let full: [Worktree.ID] = ["a", "b", "c", "d", "e"]
+    let visible: [Worktree.ID] = ["a", "b", "d", "e"]  // c is hoisted.
 
     // Move visible offset 2 (d) to visible offset 0 (before a).
     let result = SidebarItemGroup.translateFilteredMove(
@@ -683,8 +917,8 @@ struct SidebarStructureTests {
   }
 
   @Test func translateFilteredMoveDestinationPastEndMapsToFullEnd() {
-    let full = ["a", "b", "c", "d"]
-    let visible = ["a", "c", "d"]  // b is hoisted.
+    let full: [Worktree.ID] = ["a", "b", "c", "d"]
+    let visible: [Worktree.ID] = ["a", "c", "d"]  // b is hoisted.
 
     let result = SidebarItemGroup.translateFilteredMove(
       offsets: IndexSet([0]),
@@ -697,8 +931,8 @@ struct SidebarStructureTests {
   }
 
   @Test func translateFilteredMoveReturnsNilForOutOfRangeOffset() {
-    let full = ["a", "b", "c"]
-    let visible = ["a", "c"]
+    let full: [Worktree.ID] = ["a", "b", "c"]
+    let visible: [Worktree.ID] = ["a", "c"]
 
     let result = SidebarItemGroup.translateFilteredMove(
       offsets: IndexSet([5]),
@@ -710,8 +944,8 @@ struct SidebarStructureTests {
   }
 
   @Test func translateFilteredMoveReturnsNilForOutOfRangeDestination() {
-    let full = ["a", "b", "c"]
-    let visible = ["a", "c"]
+    let full: [Worktree.ID] = ["a", "b", "c"]
+    let visible: [Worktree.ID] = ["a", "c"]
 
     let result = SidebarItemGroup.translateFilteredMove(
       offsets: IndexSet([0]),
@@ -723,8 +957,8 @@ struct SidebarStructureTests {
   }
 
   @Test func translateFilteredMoveReturnsNilWhenVisibleHasIDNotInFull() {
-    let full = ["a", "b"]
-    let visible = ["a", "ghost"]  // "ghost" isn't in full.
+    let full: [Worktree.ID] = ["a", "b"]
+    let visible: [Worktree.ID] = ["a", "ghost"]  // "ghost" isn't in full.
 
     let result = SidebarItemGroup.translateFilteredMove(
       offsets: IndexSet([1]),
@@ -736,8 +970,8 @@ struct SidebarStructureTests {
   }
 
   @Test func translateFilteredMoveAppliedYieldsExpectedFullOrder() {
-    let full = ["a", "b", "c", "d", "e"]
-    let visible = ["a", "b", "d", "e"]  // c is hoisted.
+    let full: [Worktree.ID] = ["a", "b", "c", "d", "e"]
+    let visible: [Worktree.ID] = ["a", "b", "d", "e"]  // c is hoisted.
 
     // Drag b (visible 1) past d (to before e, visible 3).
     let translated = SidebarItemGroup.translateFilteredMove(
@@ -756,8 +990,8 @@ struct SidebarStructureTests {
   }
 
   @Test func translateFilteredMoveHandlesEmptyOffsets() {
-    let full = ["a", "b"]
-    let visible = ["a", "b"]
+    let full: [Worktree.ID] = ["a", "b"]
+    let visible: [Worktree.ID] = ["a", "b"]
 
     let result = SidebarItemGroup.translateFilteredMove(
       offsets: IndexSet(),
@@ -773,8 +1007,8 @@ struct SidebarStructureTests {
     // Inclusive upper-bound test: visible's last index (NOT past-end) when
     // followed by a hoisted tail row must map to its own full index, not the
     // full-end. Drops the dragged row before the hoisted tail, not after.
-    let full = ["a", "b", "c", "d"]  // d is hoisted.
-    let visible = ["a", "b", "c"]
+    let full: [Worktree.ID] = ["a", "b", "c", "d"]  // d is hoisted.
+    let visible: [Worktree.ID] = ["a", "b", "c"]
 
     let translated = SidebarItemGroup.translateFilteredMove(
       offsets: IndexSet([0]),
