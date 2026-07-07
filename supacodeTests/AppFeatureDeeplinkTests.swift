@@ -715,7 +715,8 @@ struct AppFeatureDeeplinkTests {
       .deeplink(
         .worktree(id: worktree.id, action: .runScript(scriptID: definition.id)),
         source: .socket,
-        responseFD: 42
+        responseFD: 42,
+        timeoutSeconds: 0
       )
     )
     #expect(store.state.deeplinkInputConfirmation?.responseFD == 42)
@@ -1810,7 +1811,8 @@ struct AppFeatureDeeplinkTests {
       .deeplink(
         .worktree(id: worktree.id, action: .tabNew(input: "echo test", id: nil)),
         source: .socket,
-        responseFD: 42
+        responseFD: 42,
+        timeoutSeconds: 0
       )
     )
     #expect(store.state.deeplinkInputConfirmation?.responseFD == 42)
@@ -1837,7 +1839,8 @@ struct AppFeatureDeeplinkTests {
       .deeplink(
         .worktree(id: worktree.id, action: .tabNew(input: "echo first", id: nil)),
         source: .socket,
-        responseFD: oldWriteFD
+        responseFD: oldWriteFD,
+        timeoutSeconds: 0
       )
     )
     #expect(store.state.deeplinkInputConfirmation?.responseFD == oldWriteFD)
@@ -1852,7 +1855,8 @@ struct AppFeatureDeeplinkTests {
       .deeplink(
         .worktree(id: worktree.id, action: .tabNew(input: "echo second", id: nil)),
         source: .socket,
-        responseFD: newWriteFD
+        responseFD: newWriteFD,
+        timeoutSeconds: 0
       )
     )
     await store.finish()

@@ -1,98 +1,14 @@
 ## Build Commands
 
 ```bash
-make doctor                      # Diagnose build prerequisites (run this first on a new machine)
-make build-ghostty-xcframework  # Rebuild GhosttyKit from Zig source (requires mise)
-make build-app                   # Build macOS app (Debug) via xcodebuild
-make run-app                     # Build and launch Debug app
-make install-dev-build           # Build and copy to /Applications
-make format                      # Run swift-format only
-make lint                        # Run swiftlint only (fix + lint)
-make check                       # Run both format and lint
-make test                        # Run all tests
-make log-stream                  # Stream app logs (subsystem: app.supabit.supacode)
-make bump-version                # Bump patch version and create git tag
-make bump-and-release            # Bump version and push to trigger release
-```
-
-Run a single test class or method:
-```bash
-xcodebuild test -project supacode.xcodeproj -scheme supacode -destination "platform=macOS" \
-  -only-testing:supacodeTests/TerminalTabManagerTests \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" -skipMacroValidation
+make # this show available commands
 ```
 
 Requires [mise](https://mise.jdx.dev/) for zig, swiftlint, swift-format, xcbeautify, and xcsift tooling. Run `mise install` once to fetch the pinned versions.
 
-## Building on macOS 26.4+ (Tahoe)
-
-On macOS 26.4+ the GhosttyKit build fails to link with a wall of `undefined symbol: _malloc, _free, _sigaction, …` in `build_zcu.o`. **The fix is to build against Xcode 26.3, not the toolchain version.**
-
-**Run `make doctor` first** — it verifies every prerequisite below (mise on PATH, submodules, a Zig-linkable Xcode, license/first-launch, Metal Toolchain, pinned mise tools) and prints the exact command to fix each failure. The build targets also run it automatically as a quiet preflight (skipped on CI, or set `SUPACODE_SKIP_PREFLIGHT=1` to skip it locally). First-time setup, in order:
-
-1. **mise on PATH.** `make` targets call `mise exec`, but mise installs at `~/.local/bin/mise`, which non-login shells don't pick up. Activate it: `echo 'eval "$(~/.local/bin/mise activate zsh)"' >> ~/.zshrc` (or add `~/.local/bin` to `PATH`), then `mise install`.
-2. **Submodules.** `git submodule update --init --recursive` (ghostty, zmx, git-wt).
-3. **Xcode 26.3.** The pinned Zig (`0.15.2`, required exactly by ghostty's `build.zig` `requireZig`, and it uses 0.15.2-only stdlib APIs, so bumping Zig is not an option) cannot link the macOS 26.4+ SDK: that SDK's `usr/lib/libSystem.tbd` dropped the plain `arm64-macos` target (keeping only `arm64e-macos`), and Zig 0.15.2's linker won't match — [ziglang/zig#31658](https://github.com/ziglang/zig/issues/31658), fixed only in Zig 0.16+. Install [Xcode 26.3](https://developer.apple.com/download/all/?q=Xcode%2026.3), which ships the macOS 26.2 SDK whose `.tbd` still has `arm64-macos`. **You do not need to `sudo xcode-select -s` it globally** — keep your newer Xcode as the default for other projects. The build auto-detects a Zig-linkable Xcode via `scripts/select-developer-dir.sh` and pins `DEVELOPER_DIR` for just that build (override with `DEVELOPER_DIR=… make build-app` if you want a specific one).
-4. **License + first launch.** A freshly installed Xcode 26.3 must complete these before `DEVELOPER_DIR` works (we observed `DEVELOPER_DIR` alone is insufficient until then): `sudo DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer xcodebuild -license accept` and `… -runFirstLaunch`.
-5. **Metal Toolchain.** A fresh Xcode 26.3 ships it uninstalled, and ghostty compiles Metal shaders → `cannot execute tool 'metal' due to missing Metal Toolchain`. Install it into that Xcode (target it explicitly so it lands in 26.3, not whatever is globally selected): `sudo DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer xcodebuild -downloadComponent MetalToolchain`.
-
-**Verification quirk:** check the SDK *version*, not just the `arm64-macos` slice. macOS 26.4+ SDKs still list `arm64-macos` in `libSystem.tbd` yet Zig 0.15.2 cannot link them, so grepping that string gives false positives (it accepts Xcode 26.5). `scripts/select-developer-dir.sh` gates on `xcrun --sdk macosx --show-sdk-version` being `<= 26.3` instead. Use the `--sdk macosx` form, not bare `xcrun --show-sdk-version`, which can resolve to the CommandLineTools SDK and mislead you.
-
-**Why no `patches/` entry:** the link failure is in Zig's own self-hosted linker (`build_zcu.o`, the build runner itself), not in ghostty source, so the `patches/*.patch` mechanism — which only patches the ghostty submodule working tree — cannot fix it; and ghostty pins Zig to exactly 0.15.2, so bumping Zig is out. The older-SDK + auto-`DEVELOPER_DIR` approach is the long-term fix until ghostty supports Zig 0.16+.
-
 ## Architecture
 
-Supacode is a macOS orchestrator for running multiple coding agents in parallel, using GhosttyKit as the underlying terminal.
-
-### Core Data Flow
-
-```
-AppFeature (root TCA store)
-├─ RepositoriesFeature (repos + folders, worktrees, PR state, archive/delete flows)
-├─ CommandPaletteFeature
-├─ SettingsFeature (general, notifications, coding agents, shortcuts, github, worktree, repo settings)
-└─ UpdatesFeature (Sparkle auto-updates)
-
-WorktreeTerminalManager (global @Observable terminal state)
-├─ selectedWorktreeID (tracks current selection for bell logic)
-└─ WorktreeTerminalState (per worktree)
-    └─ TerminalTabManager (tab/split management)
-        └─ GhosttySurfaceState[] (one per terminal surface)
-
-WorktreeInfoWatcherManager (global worktree watcher state)
-├─ HEAD watchers per worktree
-└─ debounced branch / file / pull request refresh events
-
-GhosttyRuntime (shared runtime)
-└─ ghostty_app_t (single C instance)
-    └─ ghostty_surface_t[] (independent terminal sessions)
-```
-
-### TCA ↔ Terminal Communication
-
-The terminal layer (`WorktreeTerminalManager`) is `@Observable` but outside TCA. Communication uses `TerminalClient`:
-
-```
-Reducer → terminalClient.send(Command) → WorktreeTerminalManager
-                                                    ↓
-Reducer ← .terminalEvent(Event) ← AsyncStream<Event>
-```
-
-- **Commands**: tab creation, initial-tab setup, blocking scripts, search, Ghostty binding actions, tab/surface closing, notification toggles, and lifecycle management
-- **Events**: notifications, dock indicator count changes, tab/focus changes, task status changes, blocking-script completion, command palette requests, and setup-script consumption
-- Wired in `supacodeApp.swift`, subscribed in `AppFeature.appLaunched`
-
-Worktree metadata refresh uses `WorktreeInfoWatcherClient` in parallel:
-
-```
-Reducer → worktreeInfoWatcher.send(Command) → WorktreeInfoWatcherManager
-                                                           ↓
-Reducer ← .repositories(.worktreeInfoEvent(Event)) ← AsyncStream<Event>
-```
-
-- **Commands**: `setWorktrees`, `setSelectedWorktreeID`, `setPullRequestTrackingEnabled`, `stop`
-- **Events**: `branchChanged`, `filesChanged`, `repositoryPullRequestRefresh`
-- Wired in `supacodeApp.swift`, subscribed in `AppFeature.appLaunched`
+Supacode is a macOS terminal emulator that for running multiple coding agents in parallel in Git worktrees, using GhosttyKit as the underlying terminal.
 
 ### Key Dependencies
 
@@ -102,12 +18,6 @@ Reducer ← .repositories(.worktreeInfoEvent(Event)) ← AsyncStream<Event>
 - **swift-dependencies**: Dependency injection for TCA clients
 - **PostHog**: Analytics
 - **Sentry**: Error tracking
-
-## Ghostty Keybindings Handling
-
-- Ghostty keybindings are handled via runtime action callbacks in `GhosttySurfaceBridge`, not by app menu shortcuts.
-- App-level tab actions should be triggered by Ghostty actions (`GHOSTTY_ACTION_NEW_TAB` / `GHOSTTY_ACTION_CLOSE_TAB`) to honor user custom bindings.
-- `GhosttySurfaceView.performKeyEquivalent` routes bound keys to Ghostty first; only unbound keys fall through to the app.
 
 ## Code Guidelines
 
@@ -125,14 +35,7 @@ Reducer ← .repositories(.worktreeInfoEvent(Event)) ← AsyncStream<Event>
 - Use `SupaLogger` for all logging. Never use `print()` or `os.Logger` directly. `SupaLogger` prints in DEBUG and uses `os.Logger` in release.
 - Avoid top-level free functions. Default to `static` methods, computed properties, or instance methods on a relevant type (enum/struct/extension). Free functions pollute the module namespace, are harder to discover, and easily drift from the inline implementation a consumer ends up writing instead. If the operation is pure and stateless, make it a `static` on a caseless `enum` or the most relevant type, not a top-level `func`.
 - Closure-typed focused values invalidate the AppKit menu on every body run (closures have no Equatable conformance, so SwiftUI re-publishes every time). Always wrap menu-bar action closures with `FocusedAction<Input>` and publish via `.focusedSceneAction(_:enabled:token:perform:)` / `.focusedAction(_:enabled:token:perform:)`. The wrapper dedupes on `(isEnabled, token)`, so AppKit only rebuilds the menu when something the menu actually displays changes. Token rules in `App/Models/FocusedAction.swift`: set `token` to a hashable projection of any captured state that affects behavior; leave it `nil` when the closure captures only the store / `@State` bindings. Consumers should read the action with `@FocusedValue(\.x)` and gate with `action?.isEnabled != true`, not `action == nil`.
-
-### Formatting & Linting
-
-- 2-space indentation, 120 character line length (enforced by `.swift-format.json`)
-- `make format` runs the mise-pinned `swift-format` (`spm:swiftlang/swift-format` in `mise.toml`), NOT the Xcode toolchain's built-in `swift format`. The pin keeps formatting reproducible across contributors' Xcodes — an unpinned toolchain formatter rewrites the whole tree (e.g. Swift call-site trailing commas) and produces spurious churn. Bump the pin in lockstep with the Swift toolchain (tag `60X.x` ↔ Swift 6.X).
-- Trailing commas are mandatory (enforced by `.swiftlint.yml`)
-- SwiftLint runs in strict mode; never disable lint rules without permission
-- Custom SwiftLint rule: `store_state_mutation_in_views` — do not mutate `store.*` directly in view files; send actions instead
+- Sidebar rows must not fan out invalidation. Per-row state lives in `RepositoriesFeature.State.sidebarItems` so a per-leaf mutation (notification tick, agent activity, running-script update) invalidates only that leaf, not every sibling. The view renders the cached `state.sidebarStructure` (computed in the reducer's post-reduce hook), never reading `sidebarItems[id:]` from a view body; derive per-leaf data in `computeSidebarStructure(...)`, not in the view.
 
 ## UX Standards
 
@@ -147,7 +50,8 @@ Reducer ← .repositories(.worktreeInfoEvent(Event)) ← AsyncStream<Event>
 - After a task, ensure the app builds: `make build-app`
 - Automatically commit your changes and your changes only. Do not use `git add .`
 - Before you go on your task, check the current git branch name, if it's something generic like an animal name, name it accordingly. Do not do this for main branch
-- After implementing an execplan, always submit a PR if you're not in the main branch
+- Do not open a pull request unless the user explicitly asks for one. Commit to the working branch and let the user decide when to push and open a PR.
+- When the user does ask you to open an issue or pull request, follow the templates in `.github`: fill the bug or feature issue form, and use the pull request template (link the issue with `Closes #<number>`, complete the checklist, and disclose any AI tools you used). A human is the author of record: never set an AI agent as a commit author or co-author.
 
 ## Sidebar performance
 

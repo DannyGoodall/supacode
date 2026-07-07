@@ -50,6 +50,13 @@ struct GitClientDependency: Sendable {
       _ baseRef: String,
       _ directoryOverride: URL?
     ) -> AsyncThrowingStream<GitWorktreeCreateEvent, Error>
+  var cloneStream:
+    @Sendable (
+      _ repositoryURL: String,
+      _ destination: URL,
+      _ branch: String?,
+      _ depth: Int?
+    ) -> AsyncThrowingStream<GitCloneEvent, Error>
   var removeWorktree: @Sendable (_ worktree: Worktree, _ deleteBranch: Bool) async throws -> URL
   var isBareRepository: @Sendable (_ repoRoot: URL) async throws -> Bool
   var branchName: @Sendable (URL) async -> String?
@@ -166,6 +173,14 @@ extension GitClientDependency: DependencyKey {
           directoryOverride: directoryOverride
         )
       },
+      cloneStream: { repositoryURL, destination, branch, depth in
+        GitClient(shell: shell).cloneStream(
+          repositoryURL: repositoryURL,
+          into: destination,
+          branch: branch,
+          depth: depth
+        )
+      },
       removeWorktree: { worktree, deleteBranch in
         if jjRouting, GitClientDependency.shouldUseJujutsuBackend(for: worktree.repositoryRootURL) {
           return try await JJClient().removeWorkspace(worktree, deleteBookmark: deleteBranch)
@@ -227,6 +242,11 @@ extension GitClientDependency: DependencyKey {
     value.isColocatedJJRepository = { _ in false }
     value.rootDirectoryExists = { _ in true }
     value.reconcileSupacodeLocks = { _ in }
+    // `liveValue` shells out to real `git clone`; a no-op default keeps an
+    // unstubbed test from cloning over the network. Clone tests override this.
+    value.cloneStream = { _, _, _, _ in
+      AsyncThrowingStream { $0.finish() }
+    }
     return value
   }
 }
