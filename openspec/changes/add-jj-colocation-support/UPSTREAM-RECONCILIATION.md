@@ -51,8 +51,8 @@ trivial for the maintainer to assess, and to keep each re-merge against a moving
 | Fork remote | `origin` → `github.com/DannyGoodall/supacode` |
 | Upstream remote | `upstream` → `github.com/supabitapp/supacode` |
 | Original branch point | `2df2b75` (`#393` CI restructure) — where the stack first forked |
-| Last reconciled to | `cb43b091` (upstream `v0.10.4`) on integration branch `jj-integrate-upstream-0.10.4` (merge `3af8d0a9`) — builds + `make test` green |
-| Stack size | ~50 jj commits + identity commit + one merge commit |
+| Last reconciled to | `4f33f61c` (upstream `v0.10.5`+) on integration branch `jj-integrate-upstream-0.10.5` (merge `731342c`) — builds + `make test` green (2260 tests). Prior: `v0.10.4` (merge `3af8d0a9`). |
+| Stack size | ~50 jj commits + identity commit + two merge commits |
 | Published stack branches | `jj-stack-2-backend-read` … `jj-stack-6-native-ui` on `origin` |
 | OpenSpec change | `openspec/changes/add-jj-colocation-support/` |
 
