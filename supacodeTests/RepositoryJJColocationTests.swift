@@ -270,4 +270,98 @@ struct RepositoryJJColocationTests {
       #expect(loaded?.isColocatedJJ == false)
     }
   }
+
+  // MARK: - op-log watcher discovers externally-created workspaces
+
+  /// A jj `.branchChanged` watcher event (fired when the op-log head advances,
+  /// e.g. an agent runs `jj workspace add` in a terminal) must schedule a
+  /// debounced full re-enumeration so the new workspace appears without an app
+  /// restart. Regression guard for the "new workspaces only show up after
+  /// quit + relaunch" bug.
+  @Test func jjBranchChangedSchedulesDebouncedReloadToDiscoverNewWorkspaces() async {
+    await withDependencies {
+      $0.defaultAppStorage = .inMemory
+    } operation: {
+      @Shared(.experimentalJJIntegration) var jjEnabled
+      $jjEnabled.withLock { $0 = true }
+
+      let root = URL(fileURLWithPath: "/tmp/supacode-jj-reload")
+      let worktree = Worktree(
+        location: .local(workingDirectory: root, repositoryRoot: root), kind: .git,
+        name: "main", detail: ""
+      )
+      let repository = Repository(
+        location: .local(root),
+        kind: .git,
+        name: "repo",
+        worktrees: IdentifiedArray(uniqueElements: [worktree]),
+        isColocatedJJ: true
+      )
+      var state = RepositoriesFeature.State()
+      state.repositories = IdentifiedArray(uniqueElements: [repository])
+      state.repositoryRoots = [root]
+
+      let clock = TestClock()
+      let store = TestStore(initialState: state) {
+        RepositoriesFeature()
+      } withDependencies: {
+        $0.continuousClock = clock
+        $0.gitClient.branchName = { _ in "main" }
+        $0.gitClient.jjChangeId = { _ in nil }
+        $0.gitClient.worktrees = { _ in [worktree] }
+        $0.gitClient.isColocatedJJRepository = { _ in true }
+      }
+      store.exhaustivity = .off
+
+      await store.send(.worktreeInfoEvent(.branchChanged(worktreeID: worktree.id)))
+      // Nothing reloads until the debounce elapses — a burst of jj ops collapses
+      // into a single reload.
+      await clock.advance(by: .seconds(2))
+      await store.receive(\.reloadRepositories)
+      await store.skipReceivedActions()
+    }
+  }
+
+  /// The reload is jj-only: a plain-git worktree's `.branchChanged` must NOT
+  /// schedule a re-enumeration (its HEAD watcher can't see unwatched new paths,
+  /// and reloading on every git branch move would be wasteful).
+  @Test func gitBranchChangedDoesNotScheduleReload() async {
+    await withDependencies {
+      $0.defaultAppStorage = .inMemory
+    } operation: {
+      let root = URL(fileURLWithPath: "/tmp/supacode-git-noreload")
+      let worktree = Worktree(
+        location: .local(workingDirectory: root, repositoryRoot: root), kind: .git,
+        name: "main", detail: ""
+      )
+      let repository = Repository(
+        location: .local(root), kind: .git, name: "repo",
+        worktrees: IdentifiedArray(uniqueElements: [worktree])
+      )
+      var state = RepositoriesFeature.State()
+      state.repositories = IdentifiedArray(uniqueElements: [repository])
+      state.repositoryRoots = [root]
+      state.reconcileSidebarForTesting()
+
+      let clock = TestClock()
+      let store = TestStore(initialState: state) {
+        RepositoriesFeature()
+      } withDependencies: {
+        // Stubs match the current row state (name already "main", no change id),
+        // so the per-row refresh handlers are no-ops on state — leaving the
+        // exhaustive store to catch a stray `.reloadRepositories` if one fired.
+        $0.continuousClock = clock
+        $0.gitClient.branchName = { _ in "main" }
+        $0.gitClient.jjChangeId = { _ in nil }
+      }
+
+      await store.send(.worktreeInfoEvent(.branchChanged(worktreeID: worktree.id)))
+      await store.receive(\.worktreeBranchNameLoaded)
+      await store.receive(\.worktreeChangeIdLoaded)
+      // No reload is scheduled for git, so advancing past the debounce window
+      // produces nothing; an exhaustive `finish()` would fail on a stray reload.
+      await clock.advance(by: .seconds(5))
+      await store.finish()
+    }
+  }
 }

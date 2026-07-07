@@ -19,6 +19,9 @@ private enum CancelID {
   static func delayedPRRefresh(_ worktreeID: Worktree.ID) -> String {
     "repositories.delayedPRRefresh.\(worktreeID)"
   }
+  static func jjWorkspaceReload(_ repositoryID: Repository.ID) -> String {
+    "repositories.jjWorkspaceReload.\(repositoryID)"
+  }
 }
 
 nonisolated let repositoriesLogger = SupaLogger("Repositories")
@@ -517,6 +520,7 @@ struct RepositoriesFeature {
   @Dependency(GithubIntegrationClient.self) private var githubIntegration
   @Dependency(RepositoryPersistenceClient.self) private var repositoryPersistence
   @Dependency(ShellClient.self) private var shellClient
+  @Dependency(\.continuousClock) private var clock
   @Dependency(\.date.now) private var now
   @Dependency(\.uuid) private var uuid
 
@@ -2865,7 +2869,7 @@ struct RepositoriesFeature {
           // re-enumerating workspaces (the ~5s latency). `nil` for git.
           let jjWorkspaceFallback = worktree.jjWorkspaceName
           let gitClient = gitClient(for: worktree)
-          return .run { send in
+          let refreshRow: Effect<Action> = .run { send in
             // Kick off both watcher subprocesses concurrently — the branch
             // label and the jj change-id come from independent `jj log` reads.
             async let branchName = gitClient.branchName(worktreeURL)
@@ -2877,6 +2881,30 @@ struct RepositoriesFeature {
             // (nil for git, so this is a no-op there).
             await send(.worktreeChangeIdLoaded(worktreeID: worktreeID, changeId: await changeId))
           }
+          // jj only: the op-log head advances on every real jj operation —
+          // INCLUDING `jj workspace add`, which the per-row refresh above can't
+          // surface (it only updates the row that fired). Debounced full
+          // re-enumeration so a workspace created externally (e.g. an agent
+          // running `jj workspace add` in a terminal) appears without an app
+          // restart or window re-activation. The DispatchSource watcher fires
+          // regardless of window focus, so this beats the activation-gated
+          // 30s poll. Cancel-in-flight collapses a burst of jj ops into one
+          // reload; `--ignore-working-copy` reads never advance op-heads, so
+          // there's no watcher→reload→watcher feedback loop. Git worktrees are
+          // out of scope: their `.git/HEAD` watcher never fires for an
+          // externally-added (unwatched) worktree path.
+          guard let repositoryID = state.repositoryID(containing: worktreeID),
+            state.usesJujutsuBackend(forRepository: repositoryID)
+          else {
+            return refreshRow
+          }
+          let clock = clock
+          let reloadOnWorkspaceChange: Effect<Action> = .run { send in
+            try? await clock.sleep(for: .seconds(2))
+            await send(.reloadRepositories(animated: true))
+          }
+          .cancellable(id: CancelID.jjWorkspaceReload(repositoryID), cancelInFlight: true)
+          return .merge(refreshRow, reloadOnWorkspaceChange)
         case .filesChanged(let worktreeID):
           guard let worktree = state.worktree(for: worktreeID) else {
             return .none
