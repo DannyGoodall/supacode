@@ -10,6 +10,7 @@ struct WorktreeTerminalTabsView: View {
   /// tab-bar surface area stays bounded to terminal state.
   let terminalsStore: StoreOf<TerminalsFeature>
   let shouldRunSetupScript: Bool
+  let isLifecycleBusy: Bool
   let forceAutoFocus: Bool
   let createTab: () -> Void
   @State private var windowActivity = WindowActivityState.inactive
@@ -22,54 +23,72 @@ struct WorktreeTerminalTabsView: View {
     // Must precede the body's tab-state read. Deferring to `.task` / `.onAppear`
     // would reintroduce the closed-all flash on first render.
     let _: Void = state.ensureInitialTab(focusing: false)
+    // Re-read config-derived colors on every Ghostty config reload, even when
+    // the focused background is unchanged (e.g. only `split-divider-color` moved).
+    let _ = manager.configGeneration
     let unfocusedSplitOverlay = manager.unfocusedSplitOverlay()
+    let dividerColor = manager.splitDividerColor()
     let _ = colorScheme
     VStack(spacing: 0) {
-      if !state.shouldHideTabBar {
-        TerminalTabBarView(
-          manager: state.tabManager,
-          terminalState: state,
-          terminalsStore: terminalsStore,
-          createTab: createTab,
-          split: { direction in
-            _ = state.performBindingActionOnFocusedSurface(direction.ghosttyBinding)
-          },
-          canSplit: state.tabManager.selectedTabId.flatMap { state.activeSurfaceID(for: $0) } != nil,
-          closeTab: { tabId in
-            state.closeTab(tabId)
-          },
-          closeOthers: { tabId in
-            state.closeOtherTabs(keeping: tabId)
-          },
-          closeToRight: { tabId in
-            state.closeTabsToRight(of: tabId)
-          },
-          closeAll: {
-            state.closeAllTabs()
-          },
-          dismissSplitZoom: { tabId in
-            state.dismissSplitZoom(for: tabId)
-          },
-          renameTab: { tabId, newTitle in
-            state.renameTab(tabId, title: newTitle)
-          },
-        )
-        .transition(.move(edge: .top).combined(with: .opacity))
-      }
+      TerminalTabBarView(
+        manager: state.tabManager,
+        terminalState: state,
+        terminalsStore: terminalsStore,
+        isLifecycleBusy: isLifecycleBusy,
+        createTab: createTab,
+        split: { direction in
+          _ = state.performBindingActionOnFocusedSurface(direction.ghosttyBinding)
+        },
+        canSplit: state.tabManager.selectedTabId.flatMap { state.activeSurfaceID(for: $0) } != nil,
+        closeTab: { tabId in
+          _ = state.requestCloseTab(tabId)
+        },
+        closeOthers: { tabId in
+          _ = state.requestCloseOtherTabs(keeping: tabId)
+        },
+        closeToRight: { tabId in
+          _ = state.requestCloseTabsToRight(of: tabId)
+        },
+        closeAll: {
+          _ = state.requestCloseAllTabs()
+        },
+        dismissSplitZoom: { tabId in
+          state.dismissSplitZoom(for: tabId)
+        },
+        renameTab: { tabId, newTitle in
+          state.renameTab(tabId, title: newTitle)
+        },
+      )
       if let selectedId = state.tabManager.selectedTabId {
         TerminalTabContentStack(tabs: state.tabManager.tabs, selectedTabId: selectedId) { tabId in
           TerminalSplitTreePane(
             tabId: tabId,
             terminalState: state,
             terminalsStore: terminalsStore,
-            unfocusedSplitOverlay: unfocusedSplitOverlay
+            unfocusedSplitOverlay: unfocusedSplitOverlay,
+            dividerColor: dividerColor
           )
         }
       } else {
         EmptyTerminalPaneView(message: "No terminals open")
       }
     }
-    .animation(.easeInOut(duration: 0.2), value: state.shouldHideTabBar)
+    .alert(
+      item: Binding(
+        get: { state.pendingCloseConfirmation },
+        set: { if $0 == nil { state.dismissPendingCloseConfirmation() } }
+      ),
+      title: { _ in Text(WorktreeTerminalState.PendingCloseConfirmation.title) },
+      actions: { pending in
+        Button("Cancel", role: .cancel) {
+          state.cancelPendingClose(pending)
+        }
+        Button(WorktreeTerminalState.PendingCloseConfirmation.actionTitle, role: .destructive) {
+          state.confirmPendingClose(pending)
+        }
+      },
+      message: { pending in Text(pending.message) }
+    )
     .background(
       WindowFocusObserverView { activity in
         windowActivity = activity
@@ -120,6 +139,7 @@ private struct TerminalSplitTreePane: View {
   let terminalState: WorktreeTerminalState
   let terminalsStore: StoreOf<TerminalsFeature>
   let unfocusedSplitOverlay: (fill: Color?, opacity: Double)
+  let dividerColor: Color
 
   var body: some View {
     let projection = terminalsStore.terminalTabs[id: tabId]
@@ -132,6 +152,7 @@ private struct TerminalSplitTreePane: View {
       terminalState: terminalState,
       activeSurfaceID: terminalState.activeSurfaceID(for: tabId),
       unfocusedSplitOverlay: unfocusedSplitOverlay,
+      dividerColor: dividerColor,
       action: { operation in
         terminalState.performSplitOperation(operation, in: tabId)
       }

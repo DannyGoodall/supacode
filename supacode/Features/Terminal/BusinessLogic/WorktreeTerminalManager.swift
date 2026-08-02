@@ -13,6 +13,7 @@ private let terminalLogger = SupaLogger("Terminal")
 @Observable
 final class WorktreeTerminalManager {
   private let runtime: GhosttyRuntime
+  @ObservationIgnored private let surfaceBindingActionPerformer: ((GhosttySurfaceView, String) -> Void)?
   private(set) var socketServer: AgentHookSocketServer?
   private var states: [Worktree.ID: WorktreeTerminalState] = [:]
   @ObservationIgnored
@@ -31,10 +32,18 @@ final class WorktreeTerminalManager {
   /// so per-tab projection / progress / task-status / focus repeats don't flood
   /// the stream. Cleared on resubscribe and purged on tab / worktree teardown.
   private var lastEmittedCoalescable: [CoalesceKey: TerminalClient.Event] = [:]
+  /// Worktrees whose projection was shed under backpressure, awaiting next-tick
+  /// redelivery. Coalesced so a shed storm replays each id at most once per tick.
+  private var pendingShedProjectionReplays: Set<Worktree.ID> = []
+  /// True while a replay drain is emitting, so a replay that itself sheds can't
+  /// schedule another and spin the buffer.
+  private var isDrainingShedProjectionReplays = false
   /// Hard cap on the live event buffer. Source coalescing keeps it near-empty in
   /// practice; this backstops a wedged consumer so memory stays bounded instead
   /// of growing without limit.
-  static let eventBufferCap = 2048
+  static let defaultEventBufferCap = 2048
+  /// Injectable so tests can force buffer shedding without 2k+ events.
+  let eventBufferCap: Int
   /// Cap for lifecycle events buffered before the first subscriber attaches.
   /// Coalescable state collapses per key and doesn't count, so this only bounds
   /// one-shot events; the sole consumer attaches at launch, well under the cap.
@@ -43,6 +52,9 @@ final class WorktreeTerminalManager {
   private var pendingIdleHookEvents: [IdleDebounceKey: Task<Void, Never>] = [:]
   @ObservationIgnored
   private let hookEventSleep: @Sendable (Duration) async throws -> Void
+  /// Injected clock, handed to each `WorktreeTerminalState` so its hibernation
+  /// grace timers run on the same time source as the manager.
+  @ObservationIgnored private let clock: any Clock<Duration>
   @ObservationIgnored @Dependency(\.zmxClient) private var zmxClient
   @ObservationIgnored @Dependency(\.analyticsClient) private var analyticsClient
   /// Serialized off-main writer that merges per-worktree layout changes into
@@ -121,6 +133,11 @@ final class WorktreeTerminalManager {
   /// (OSC 11 override or theme fallback). Single source for the window tint,
   /// `window.appearance`, and the toolbar title's color scheme.
   private(set) var focusedSurfaceBackground: NSColor
+  /// Bumped on every Ghostty config reload. Views that read config-derived
+  /// colors (split divider, unfocused-split overlay) observe this so they
+  /// re-render even when the focused background is unchanged and its dedup
+  /// suppresses a background post.
+  private(set) var configGeneration = 0
   @ObservationIgnored
   private nonisolated(unsafe) var runtimeObservers: [NSObjectProtocol] = []
   var saveLayoutSnapshot: ((Worktree.ID, TerminalLayoutSnapshot?) -> Void)?
@@ -134,11 +151,16 @@ final class WorktreeTerminalManager {
     runtime: GhosttyRuntime,
     socketServer: AgentHookSocketServer? = nil,
     clock: C = ContinuousClock(),
+    eventBufferCap: Int = WorktreeTerminalManager.defaultEventBufferCap,
+    surfaceBindingActionPerformer: ((GhosttySurfaceView, String) -> Void)? = nil
   ) {
+    self.eventBufferCap = eventBufferCap
     self.runtime = runtime
+    self.surfaceBindingActionPerformer = surfaceBindingActionPerformer
     self.focusedSurfaceBackground = runtime.backgroundColor()
     self.hookEventSleep = { duration in try await clock.sleep(for: duration) }
     self.layoutDebounceSleep = { duration in try await clock.sleep(for: duration) }
+    self.clock = clock
     @Dependency(\.settingsFileStorage) var settingsFileStorage
     self.layoutsWriter = LayoutsIncrementalWriter(storage: settingsFileStorage)
     // A theme reload changes the fallback and every non-OSC surface background.
@@ -148,7 +170,11 @@ final class WorktreeTerminalManager {
         object: runtime,
         queue: .main
       ) { [weak self] _ in
-        Task { @MainActor [weak self] in self?.refreshFocusedSurfaceBackground() }
+        Task { @MainActor [weak self] in
+          guard let self else { return }
+          self.configGeneration &+= 1
+          self.refreshFocusedSurfaceBackground()
+        }
       }
     )
     let resolvedServer = socketServer ?? AgentHookSocketServer()
@@ -265,24 +291,51 @@ final class WorktreeTerminalManager {
     handleManagementCommand(command)
   }
 
+  // swiftlint:disable:next function_parameter_count
+  private func scheduleTabCreation(
+    in worktree: Worktree,
+    runSetupScriptIfNew: Bool,
+    input: String?,
+    tabID: UUID?,
+    customTitle: String?,
+    focusing: Bool
+  ) {
+    Task {
+      createTabAsync(
+        in: worktree,
+        runSetupScriptIfNew: runSetupScriptIfNew,
+        initialInput: input,
+        tabID: tabID,
+        customTitle: customTitle,
+        focusing: focusing
+      )
+    }
+  }
+
   // swiftlint:disable:next cyclomatic_complexity
   private func handleTabCommand(_ command: TerminalClient.Command) -> Bool {
     switch command {
-    case .createTab(let worktree, let runSetupScriptIfNew, let id):
-      Task { createTabAsync(in: worktree, runSetupScriptIfNew: runSetupScriptIfNew, tabID: id) }
-    case .createTabWithInput(let worktree, let input, let runSetupScriptIfNew, let id):
-      Task {
-        createTabAsync(in: worktree, runSetupScriptIfNew: runSetupScriptIfNew, initialInput: input, tabID: id)
-      }
+    case .createTab(let worktree, let runSetupScriptIfNew, let id, let title, let focusing):
+      scheduleTabCreation(
+        in: worktree, runSetupScriptIfNew: runSetupScriptIfNew, input: nil,
+        tabID: id, customTitle: title, focusing: focusing)
+    case .createTabWithInput(
+      let worktree, let input, let runSetupScriptIfNew, let id, let title, let focusing
+    ):
+      scheduleTabCreation(
+        in: worktree, runSetupScriptIfNew: runSetupScriptIfNew, input: input,
+        tabID: id, customTitle: title, focusing: focusing)
     case .ensureInitialTab(let worktree, let runSetupScriptIfNew, let focusing):
       let state = state(for: worktree) { runSetupScriptIfNew }
       state.ensureInitialTab(focusing: focusing)
-    case .stopRunScript(let worktree):
-      _ = state(for: worktree).stopRunScripts()
-    case .stopScript(let worktree, let definitionID):
-      _ = state(for: worktree).stopScript(definitionID: definitionID)
-    case .runBlockingScript(let worktree, let kind, let script):
-      _ = state(for: worktree).runBlockingScript(kind: kind, script)
+    case .stopRunScript(let worktree, let focusing):
+      stopBlockingScripts(in: worktree) { $0.stopRunScripts(focusing: focusing) }
+    case .stopScript(let worktree, let definitionID, let focusing):
+      stopBlockingScripts(in: worktree) {
+        $0.stopScript(definitionID: definitionID, focusing: focusing)
+      }
+    case .runBlockingScript(let worktree, let kind, let script, let focusing):
+      _ = state(for: worktree).runBlockingScript(kind: kind, script, focusing: focusing)
     case .closeFocusedTab(let worktree):
       _ = closeFocusedTab(in: worktree)
     case .closeFocusedSurface(let worktree):
@@ -291,12 +344,18 @@ final class WorktreeTerminalManager {
       let terminal = state(for: worktree)
       guard let tabID = explicitTabID ?? terminal.tabManager.selectedTabId else { break }
       terminal.tabManager.beginTabRename(tabID)
+    case .renameTab(let worktree, let tabID, let title):
+      let applied = stateIfExists(for: worktree.id)?.renameTab(tabID, title: title) ?? false
+      emit(.tabRenamed(worktreeID: worktree.id, tabID: tabID, applied: applied))
     case .selectTab(let worktree, let tabID):
       state(for: worktree).selectTab(tabID)
     case .selectTabAtIndex(let worktree, let index):
       stateIfExists(for: worktree.id)?.selectTabAtIndex(index)
     case .focusSurface(let worktree, let tabID, let surfaceID, let input):
       let terminal = state(for: worktree)
+      // Wake explicitly for parity with the split and destroy handlers; selectTab
+      // would wake a dormant tab anyway.
+      terminal.wakeTab(tabID)
       terminal.selectTab(tabID)
       guard terminal.focusSurface(id: surfaceID) else {
         terminalLogger.warning("focusSurface: surface \(surfaceID) not found in worktree \(worktree.id).")
@@ -305,16 +364,25 @@ final class WorktreeTerminalManager {
       if let input, !input.isEmpty {
         terminal.focusAndInsertText(input + "\r")
       }
-    case .splitSurface(let worktree, let tabID, let surfaceID, let direction, let input, let id):
+    case .splitSurface(
+      let worktree, let tabID, let surfaceID, let direction, let input, let id, let focusing
+    ):
       let terminal = state(for: worktree)
-      terminal.selectTab(tabID)
+      // Wake explicitly for parity with the focus and destroy handlers; selectTab
+      // would wake a dormant tab anyway. The wake runs even when not focusing,
+      // since splitting a dormant tab would otherwise land in a frozen layout.
+      terminal.wakeTab(tabID)
+      if focusing {
+        terminal.selectTab(tabID)
+      }
       let ghosttyDirection: GhosttySplitAction.NewDirection = direction == .vertical ? .down : .right
       let resolvedInput = BlockingScriptRunner.makeCommandInput(script: input ?? "")
       let splitSucceeded = terminal.performSplitAction(
         .newSplit(direction: ghosttyDirection),
         for: surfaceID,
         newSurfaceID: id,
-        initialInput: resolvedInput
+        initialInput: resolvedInput,
+        focusing: focusing
       )
       guard splitSucceeded else {
         terminalLogger.warning("splitSurface: failed for surface \(surfaceID) in worktree \(worktree.id).")
@@ -326,7 +394,7 @@ final class WorktreeTerminalManager {
         }
         break
       }
-    case .destroyTab(let worktree, let tabID):
+    case .destroyTab(let worktree, let tabID, let focusing):
       let terminal = state(for: worktree)
       guard terminal.tabManager.tabs.contains(where: { $0.id == tabID }) else {
         terminalLogger.warning("destroyTab: tab \(tabID.rawValue) not found in worktree \(worktree.id).")
@@ -334,10 +402,16 @@ final class WorktreeTerminalManager {
         emit(.tabRemoved(worktreeID: worktree.id, tabID: tabID))
         break
       }
-      terminal.closeTab(tabID)
-    case .destroySurface(let worktree, let tabID, let surfaceID):
+      terminal.closeTab(tabID, focusing: focusing)
+    case .destroySurface(let worktree, let tabID, let surfaceID, let focusing):
       let terminal = state(for: worktree)
-      terminal.selectTab(tabID)
+      // Wake explicitly for parity with the focus and split handlers. The wake
+      // runs even when not focusing, since closing inside a dormant tab would
+      // otherwise operate on a frozen layout.
+      terminal.wakeTab(tabID)
+      if focusing {
+        terminal.selectTab(tabID)
+      }
       if !terminal.closeSurface(id: surfaceID) {
         terminalLogger.warning("destroySurface: surface \(surfaceID) not found in worktree \(worktree.id).")
         // Don't synthesize a `surfacesClosed` here: it drives global presence
@@ -366,8 +440,9 @@ final class WorktreeTerminalManager {
     case .createTab, .createTabWithInput, .ensureInitialTab, .stopRunScript, .stopScript,
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
       .performBindingActionOnSurface, .selectTab, .selectTabAtIndex, .focusSurface, .splitSurface,
-      .destroyTab, .destroySurface, .prune, .setNotificationsEnabled, .setSelectedWorktreeID,
-      .refreshTabBarVisibility, .beginTabRename:
+      .destroyTab, .destroySurface, .renameTab, .setImagePasteAgents, .prune, .setNotificationsEnabled,
+      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .beginTabRename,
+      .setTerminalHibernationEnabled:
       return false
     }
     return true
@@ -379,14 +454,23 @@ final class WorktreeTerminalManager {
       state(for: worktree).performBindingActionOnFocusedSurface(action)
     case .performBindingActionOnSurface(let worktree, let surfaceID, let action):
       state(for: worktree).performBindingAction(action, onSurfaceID: surfaceID)
+    case .setImagePasteAgents(let surfaceID, let agents):
+      setImagePasteAgents(agents, onSurfaceID: surfaceID)
     case .createTab, .createTabWithInput, .ensureInitialTab, .stopRunScript, .stopScript,
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .startSearch, .searchSelection,
       .navigateSearchNext, .navigateSearchPrevious, .endSearch, .selectTab, .selectTabAtIndex,
-      .focusSurface, .splitSurface, .destroyTab, .destroySurface, .prune, .setNotificationsEnabled,
-      .setSelectedWorktreeID, .refreshTabBarVisibility, .beginTabRename:
+      .focusSurface, .splitSurface, .destroyTab, .destroySurface, .renameTab, .prune, .setNotificationsEnabled,
+      .enforceNotificationRetentionLimit, .setSelectedWorktreeID, .beginTabRename,
+      .setTerminalHibernationEnabled:
       return false
     }
     return true
+  }
+
+  private func setImagePasteAgents(_ agents: Set<SkillAgent>, onSurfaceID surfaceID: UUID) {
+    for state in states.values where state.setImagePasteAgents(agents, onSurfaceID: surfaceID) {
+      return
+    }
   }
 
   private func handleManagementCommand(_ command: TerminalClient.Command) {
@@ -395,27 +479,38 @@ final class WorktreeTerminalManager {
       prune(keeping: ids, protectingRepositoryIDs: protectedRepositoryIDs)
     case .setNotificationsEnabled(let enabled):
       setNotificationsEnabled(enabled)
-    case .refreshTabBarVisibility:
+    case .enforceNotificationRetentionLimit:
+      enforceNotificationRetentionLimit()
+    case .setTerminalHibernationEnabled(let enabled):
       for state in states.values {
-        state.refreshTabBarVisibility()
+        state.applyHibernationEnabled(enabled)
       }
     case .setSelectedWorktreeID(let id):
       guard id != selectedWorktreeID else { return }
       if let previousID = selectedWorktreeID, let previousState = states[previousID] {
         previousState.rememberFocusedZoom()
         previousState.setAllSurfacesOccluded()
+        previousState.forgetLastEmittedFocus()
+        // Deselecting schedules grace timers for every tab of the old worktree.
+        previousState.setWorktreeSelected(false)
+        lastEmittedCoalescable.removeValue(forKey: .focus(previousID))
         markLayoutDirty(worktreeID: previousID)
       }
       selectedWorktreeID = id
+      // Selecting cancels the grace timer of the worktree's selected tab; its
+      // other tabs stay scheduled.
+      if let id, let newState = states[id] {
+        newState.setWorktreeSelected(true)
+      }
       // A sidebar click never hands AppKit focus to the terminal, so no focus
       // event fires; refresh here or the window keeps the previous tint.
       refreshFocusedSurfaceBackground()
       terminalLogger.info("Selected worktree \(id?.rawValue ?? "nil")")
     case .createTab, .createTabWithInput, .ensureInitialTab, .stopRunScript, .stopScript,
       .runBlockingScript, .closeFocusedTab, .closeFocusedSurface, .performBindingAction,
-      .performBindingActionOnSurface, .startSearch, .searchSelection, .navigateSearchNext,
+      .performBindingActionOnSurface, .setImagePasteAgents, .startSearch, .searchSelection, .navigateSearchNext,
       .navigateSearchPrevious, .endSearch, .selectTab, .selectTabAtIndex, .focusSurface,
-      .splitSurface, .destroyTab, .destroySurface, .beginTabRename:
+      .splitSurface, .destroyTab, .destroySurface, .renameTab, .beginTabRename:
       assertionFailure("Unhandled terminal command reached management handler: \(command)")
     }
   }
@@ -424,7 +519,7 @@ final class WorktreeTerminalManager {
     eventContinuation?.finish()
     let (stream, continuation) = AsyncStream.makeStream(
       of: TerminalClient.Event.self,
-      bufferingPolicy: .bufferingNewest(Self.eventBufferCap)
+      bufferingPolicy: .bufferingNewest(eventBufferCap)
     )
     eventContinuation = continuation
     lastNotificationIndicatorCount = nil
@@ -432,6 +527,7 @@ final class WorktreeTerminalManager {
     // fresh subscriber then has the latest value recorded for every key.
     lastEmittedProjections.removeAll()
     lastEmittedCoalescable.removeAll()
+    pendingShedProjectionReplays.removeAll()
     if !pendingEvents.isEmpty {
       let bufferedEvents = pendingEvents
       pendingEvents.removeAll()
@@ -467,6 +563,33 @@ final class WorktreeTerminalManager {
     return stream
   }
 
+  /// Wires the presence / hibernation callbacks and seeds the visibility flag.
+  private func configurePresenceCallbacks(for state: WorktreeTerminalState, worktree: Worktree) {
+    // Seed the visibility flag so a background worktree's tabs start their grace
+    // timers, and freeze live agent records into the layout at hibernation time.
+    state.setWorktreeSelected(selectedWorktreeID == worktree.id)
+    state.hibernationAgentsBySurface = { [weak self] in self?.currentAgentsBySurface?() ?? [:] }
+    state.isSelected = { [weak self] in
+      self?.selectedWorktreeID == worktree.id
+    }
+    state.onSurfacesClosed = { [weak self] ids in
+      self?.emit(.surfacesClosed(worktreeID: worktree.id, ids))
+      // The last surface closing leaves no focus target, so no focus event
+      // follows; fall back to the theme background here.
+      self?.refreshFocusedSurfaceBackground()
+    }
+    // Hibernation keeps the zmx sessions and presence records; only the pending
+    // idle-debounce tasks for the torn-down surfaces need cancelling.
+    state.onSurfacesHibernated = { [weak self] ids in self?.cancelPendingIdleHooks(forSurfaceIDs: ids) }
+    // A hibernate / wake leaves the surface set unchanged, so re-emit the row
+    // projection here or the sidebar sleep marker never tracks `allTabsDormant`.
+    state.onDormancyChanged = { [weak self] in self?.emitProjection(for: worktree.id) }
+    // OSC-sourced presence events go through the existing idle-debounce funnel.
+    state.onAgentHookEvent = { [weak self] event in
+      self?.dispatchHookEvent(event)
+    }
+  }
+
   func state(
     for worktree: Worktree,
     runSetupScriptIfNew: () -> Bool = { false }
@@ -476,7 +599,7 @@ final class WorktreeTerminalManager {
         existing.enableSetupScriptIfNeeded()
       }
       // Reload snapshot if the state has no tabs (e.g., setting was just enabled).
-      // If `hasAttemptedInitialTab` is sticky-true (closeAllTabs path), the snapshot
+      // If `hasAttemptedInitialTab` is sticky-true (every tab was closed), the snapshot
       // stays staged but ensureInitialTab won't consume it; that's intentional.
       if existing.tabManager.tabs.isEmpty,
         existing.pendingLayoutSnapshot == nil,
@@ -490,7 +613,9 @@ final class WorktreeTerminalManager {
     let state = WorktreeTerminalState(
       runtime: runtime,
       worktree: worktree,
-      runSetupScript: runSetupScript
+      runSetupScript: runSetupScript,
+      hibernationClock: clock,
+      surfaceBindingActionPerformer: surfaceBindingActionPerformer
     )
     state.socketPath = socketServer?.socketPath
     // Load saved layout snapshot for restoration (skip when a setup script is pending).
@@ -498,19 +623,7 @@ final class WorktreeTerminalManager {
       state.pendingLayoutSnapshot = loadLayoutSnapshot?(worktree.id)
     }
     state.setNotificationsEnabled(notificationsEnabled)
-    state.isSelected = { [weak self] in
-      self?.selectedWorktreeID == worktree.id
-    }
-    state.onSurfacesClosed = { [weak self] ids in
-      self?.emit(.surfacesClosed(worktreeID: worktree.id, ids))
-      // The last surface closing leaves no focus target, so no focus event
-      // follows; fall back to the theme background here.
-      self?.refreshFocusedSurfaceBackground()
-    }
-    // OSC-sourced presence events go through the existing idle-debounce funnel.
-    state.onAgentHookEvent = { [weak self] event in
-      self?.dispatchHookEvent(event)
-    }
+    configurePresenceCallbacks(for: state, worktree: worktree)
     state.onNotificationReceived = { [weak self] surfaceID, title, body, isViewed in
       self?.emit(
         .notificationReceived(
@@ -554,6 +667,11 @@ final class WorktreeTerminalManager {
     state.onBlockingScriptCompleted = { [weak self] kind, exitCode, tabId in
       self?.emit(.blockingScriptCompleted(worktreeID: worktree.id, kind: kind, exitCode: exitCode, tabId: tabId))
     }
+    state.onRunningScriptsChanged = { [weak self] in
+      // Force past the projection dedupe: an archived-strip can clear the row while
+      // the cache still holds running, so a plain emit would dedupe and strand it (#573).
+      self?.forceEmitProjection(for: worktree.id)
+    }
     state.onCommandPaletteToggle = { [weak self] in
       self?.emit(.commandPaletteToggleRequested(worktreeID: worktree.id))
     }
@@ -580,9 +698,17 @@ final class WorktreeTerminalManager {
     in worktree: Worktree,
     runSetupScriptIfNew: Bool,
     initialInput: String? = nil,
-    tabID: UUID? = nil
+    tabID: UUID? = nil,
+    customTitle: String? = nil,
+    focusing: Bool = true
   ) {
     let state = state(for: worktree) { runSetupScriptIfNew }
+    // A CLI `tab new` on a cold-staged worktree must consume the persisted layout
+    // first, or `ensureInitialTab` later hits its `tabs.isEmpty` guard and strands
+    // the staged snapshot (then the next flush overwrites it).
+    if state.pendingLayoutSnapshot != nil, !state.hasAttemptedInitialTab {
+      state.ensureInitialTab(focusing: false)
+    }
     let setupScript: String?
     if state.needsSetupScript() {
       @SharedReader(.repositorySettings(worktree.repositoryRootURL, host: worktree.host))
@@ -591,7 +717,13 @@ final class WorktreeTerminalManager {
     } else {
       setupScript = nil
     }
-    let created = state.createTab(setupScript: setupScript, initialInput: initialInput, tabID: tabID)
+    let created = state.createTab(
+      activation: focusing ? .focused : .background,
+      setupScript: setupScript,
+      initialInput: initialInput,
+      tabID: tabID,
+      customTitle: customTitle
+    )
     guard created == nil, let tabID else { return }
     // Drain a waiting CLI ack now instead of stranding it until the timeout.
     emit(
@@ -683,7 +815,9 @@ final class WorktreeTerminalManager {
   private func flushLayoutSnapshot(worktreeID: Worktree.ID) {
     layoutDirtyTasks[worktreeID] = nil
     guard let state = states[worktreeID] else { return }
-    let agents = currentAgentsBySurface?() ?? [:]
+    // A nil map (closure unwired) keeps frozen dormant records instead of wiping
+    // them; production always wires the authoritative live presence source.
+    let agents = currentAgentsBySurface?()
     // A nil snapshot (no remaining tabs) clears the key rather than persisting
     // an empty layout, matching the on-disk "no trace" semantics for emptiness.
     let snapshot = state.captureLayoutSnapshot(agentsBySurface: agents)
@@ -731,11 +865,12 @@ final class WorktreeTerminalManager {
     layoutFlushTasks.removeAll()
   }
 
-  /// Tears down persistent zmx sessions for worktrees that just left the keep set.
-  /// Parallel kill so a single stuck daemon doesn't pin the executor for
-  /// `subprocessTimeout * N` (the bound is a single, maximum timeout regardless
-  /// of N). `remoteSessions` are the host-side sessions of pruned remote
-  /// worktrees, torn down best-effort over SSH.
+  /// Tears down persistent zmx sessions for worktrees that just left the keep
+  /// set. Parallel across surfaces; within one surface the remote kill precedes
+  /// the local one (see `ZmxClient.killSurfaceSessions`), so the bound is one
+  /// remote (15s) plus one local (5s) timeout regardless of N. Detached and
+  /// unbudgeted; a quit inside that window leaves local survivors to the
+  /// next-launch orphan reap (a host-side survivor has no reaper).
   private func killZmxSessions(
     _ sessionIDs: [String],
     remoteSessions: [(host: RemoteHost, sessionID: String)] = []
@@ -746,20 +881,57 @@ final class WorktreeTerminalManager {
       "terminal_persistence_session_killed",
       ["reason": "worktree_pruned", "count": sessionIDs.count, "remote_count": remoteSessions.count]
     )
+    let plan = Self.killPlan(localSessionIDs: sessionIDs, remoteSessions: remoteSessions)
     Task.detached {
       await withTaskGroup(of: Void.self) { group in
-        for id in sessionIDs {
-          group.addTask { await client.killSession(id) }
-        }
-        for remote in remoteSessions {
-          group.addTask { await client.killRemoteSession(remote.host, remote.sessionID) }
+        for entry in plan {
+          group.addTask {
+            await client.killSurfaceSessions(
+              sessionID: entry.sessionID, remoteHost: entry.host, killLocal: entry.killLocal)
+          }
         }
       }
     }
   }
 
+  /// One surface's session teardown: the host-side session (when remote) and the
+  /// local session, run remote-first via `ZmxClient.killSurfaceSessions`.
+  struct SurfaceSessionKill: Sendable {
+    let sessionID: String
+    let host: RemoteHost?
+    let killLocal: Bool
+  }
+
+  /// Merges the local and remote kill lists into one entry per session so each
+  /// surface's remote+local teardown runs in the safe order (see
+  /// `ZmxClient.killSurfaceSessions`). A session present in only one list keeps
+  /// that side; a session in both is torn down remote-first then local.
+  static func killPlan(
+    localSessionIDs: [String],
+    remoteSessions: [(host: RemoteHost, sessionID: String)]
+  ) -> [SurfaceSessionKill] {
+    let localSet = Set(localSessionIDs)
+    let remoteByID = Dictionary(remoteSessions.map { ($0.sessionID, $0.host) }) { first, second in
+      // One host per session ID by construction; a collision leaks the dropped
+      // host's session, so make it visible.
+      terminalLogger.warning(
+        "killPlan: one session on two hosts; keeping \(first.alias), dropping \(second.alias)")
+      return first
+    }
+    let orderedIDs = localSessionIDs + remoteSessions.map(\.sessionID).filter { !localSet.contains($0) }
+    var seen: Set<String> = []
+    return orderedIDs.compactMap { id in
+      guard seen.insert(id).inserted else { return nil }
+      return SurfaceSessionKill(sessionID: id, host: remoteByID[id], killLocal: localSet.contains(id))
+    }
+  }
+
   func tabExists(worktreeID: Worktree.ID, tabID: TerminalTabID) -> Bool {
     states[worktreeID]?.hasTab(tabID) ?? false
+  }
+
+  func tabCanRename(worktreeID: Worktree.ID, tabID: TerminalTabID) -> Bool {
+    states[worktreeID]?.tabManager.canRename(tabID) ?? false
   }
 
   func surfaceExists(worktreeID: Worktree.ID, tabID: TerminalTabID, surfaceID: UUID) -> Bool {
@@ -801,7 +973,7 @@ final class WorktreeTerminalManager {
   /// hosts. zmx is a long-lived per-user daemon that outlives our app quit,
   /// so "Quit and Terminate" must explicitly sweep orphan sessions or they
   /// would survive forever.
-  func terminateAllSessions() async {
+  func terminateAllSessions(killBudget: Duration = WorktreeTerminalManager.quitKillBudget) async {
     let trackedSurfaceIDs = states.values.flatMap(\.allSurfaceIDs)
     let trackedSessionIDs = Set(trackedSurfaceIDs.map(ZmxSessionID.make(surfaceID:)))
     // "Quit and Terminate" promises nothing keeps running, so the host-side
@@ -811,11 +983,16 @@ final class WorktreeTerminalManager {
       state.closeAllSurfaces()
     }
     emitHasAnyTerminalSurfaceIfNeeded()
-    // This instance's tracked sessions are always killed. The orphan subset
-    // (live and untracked) is attach-aware: spared when a client is attached or
-    // the count is unknown, so a concurrently-running instance keeps its
-    // sessions. Orphan reaping is therefore eventually consistent: the last
-    // instance to quit with no live clients sweeps what remains.
+    // This instance's tracked local sessions are killed. A remote surface's
+    // local kill is gated behind its budgeted remote kill (see
+    // `ZmxClient.killSurfaceSessions`); when the budget expires first, the
+    // post-budget fallback retries it uncancelled. A kill that fails without
+    // cancellation (stuck daemon) is not retried; either way what remains
+    // locally is left to the next-launch orphan reap. The orphan subset (live and
+    // untracked) is attach-aware: spared when a client is attached or the count
+    // is unknown, so a concurrently-running instance keeps its sessions. Orphan
+    // reaping is therefore eventually consistent: the last instance to quit
+    // with no live clients sweeps what remains.
     let liveSessions = await zmxClient.listSessionsWithClients()
     let orphanSessions: [String]
     if let liveSessions {
@@ -842,34 +1019,75 @@ final class WorktreeTerminalManager {
     let client = zmxClient
     if !trackedRemoteSessions.isEmpty {
       terminalLogger.info(
-        "Quit: tearing down \(trackedRemoteSessions.count) host-side zmx session(s), bounded by \(Self.quitKillBudget)"
+        "Quit: tearing down \(trackedRemoteSessions.count) host-side zmx session(s), bounded by \(killBudget)"
       )
     }
     // Raced against a budget so an unreachable host cannot hold the quit path
     // for the full remote ssh timeout; stragglers are cancelled (best-effort).
-    await withTaskGroup(of: Void.self) { group in
-      group.addTask {
-        await withTaskGroup(of: Void.self) { kills in
-          for id in allSessions {
-            kills.addTask { await client.killSession(id) }
-          }
-          for remote in trackedRemoteSessions {
-            kills.addTask { await client.killRemoteSession(remote.host, remote.sessionID) }
+    let plan = Self.killPlan(localSessionIDs: allSessions, remoteSessions: trackedRemoteSessions)
+    let attemptedLocalKills = LockIsolated<Set<String>>([])
+    await Self.raceKillBudget(killBudget) {
+      await withTaskGroup(of: Void.self) { kills in
+        for entry in plan {
+          kills.addTask {
+            await client.killSurfaceSessions(
+              sessionID: entry.sessionID, remoteHost: entry.host, killLocal: entry.killLocal)
+            guard entry.killLocal, !Task.isCancelled else { return }
+            attemptedLocalKills.withValue { _ = $0.insert(entry.sessionID) }
           }
         }
       }
-      group.addTask {
-        try? await Task.sleep(for: Self.quitKillBudget)
+    }
+    await killSurvivingLocalSessions(plan: plan, attempted: attemptedLocalKills.value)
+  }
+
+  /// Post-budget fallback: a local session whose gated kill lost the quit
+  /// budget would otherwise keep its ssh reconnect loop hammering the host
+  /// until the next-launch orphan reap. Ordering is moot by now (the paired
+  /// remote kill already ran or was cancelled), so kill the survivors directly,
+  /// bounded so a stuck daemon cannot re-hang quit.
+  private func killSurvivingLocalSessions(
+    plan: [SurfaceSessionKill],
+    attempted: Set<String>
+  ) async {
+    let survivors = plan.filter { $0.killLocal && !attempted.contains($0.sessionID) }.map(\.sessionID)
+    guard !survivors.isEmpty else { return }
+    terminalLogger.warning(
+      "Quit kill budget expired; retrying local kill for: \(survivors.joined(separator: ", "))")
+    let client = zmxClient
+    await Self.raceKillBudget(Self.quitLocalFallbackBudget) {
+      await withTaskGroup(of: Void.self) { kills in
+        for id in survivors {
+          kills.addTask { await client.killSession(id) }
+        }
       }
+    }
+  }
+
+  /// Runs `work` racing a `budget` timeout; whichever finishes first cancels
+  /// the other, so a stuck kill cannot outlast the budget.
+  private static func raceKillBudget(
+    _ budget: Duration, _ work: @escaping @Sendable () async -> Void
+  ) async {
+    await withTaskGroup(of: Void.self) { group in
+      group.addTask { await work() }
+      group.addTask { try? await Task.sleep(for: budget) }
       defer { group.cancelAll() }
       await group.next()
     }
   }
 
-  /// Cap on the quit-time kill sweep: comfortably above the local zmx cap
-  /// (5s) so local teardown is never truncated, well under the remote ssh cap
-  /// (15s) so an unreachable host cannot make quit feel hung.
+  /// Cap on the quit-time kill sweep: comfortably above the local zmx cap (5s)
+  /// so a local-only teardown is never truncated, well under the remote ssh cap
+  /// (15s) so an unreachable host cannot make quit feel hung. A remote surface's
+  /// local kill is gated behind its remote kill; when the budget cuts it off,
+  /// `killSurvivingLocalSessions` retries it on its own short budget.
   static let quitKillBudget: Duration = .seconds(6)
+
+  /// Bound on the post-budget local retry: local kills land in well under the
+  /// local zmx cap (5s); 2s keeps worst-case quit around 8s, still under the
+  /// remote ssh cap (15s).
+  static let quitLocalFallbackBudget: Duration = .seconds(2)
 
   /// Reaps `supa-*` sessions zmx hosts that no persisted layout claims;
   /// catches orphans from crashes / force-quits. Attach-aware: a session with
@@ -906,6 +1124,16 @@ final class WorktreeTerminalManager {
     notificationsEnabled = enabled
     for state in states.values {
       state.setNotificationsEnabled(enabled)
+    }
+    emitNotificationIndicatorCountIfNeeded()
+  }
+
+  /// Re-applies the retention limit to every worktree, e.g. after the user lowers
+  /// it in settings so an existing backlog is trimmed without waiting for the next
+  /// notification.
+  func enforceNotificationRetentionLimit() {
+    for state in states.values {
+      state.enforceNotificationRetentionLimit()
     }
     emitNotificationIndicatorCountIfNeeded()
   }
@@ -958,9 +1186,20 @@ final class WorktreeTerminalManager {
     emitProjection(for: worktreeID)
   }
 
+  /// Indicator and projection updates propagate via each state's notification
+  /// callbacks. Every state is swept, not just the unread ones, so a surface
+  /// whose unseen mirror drifted out of sync with its notifications is repaired.
+  func markAllNotificationsRead() {
+    let unread = states.values.count(where: \.hasUnseenNotification)
+    terminalLogger.info("markAllNotificationsRead: clearing unread in \(unread) worktree(s).")
+    for state in states.values {
+      state.markAllNotificationsRead()
+    }
+  }
+
   /// Embed `agentsBySurface` in each surface so badges survive relaunch.
   func saveAllLayoutSnapshots(
-    agentsBySurface: [UUID: [TerminalLayoutSnapshot.SurfaceAgentRecord]] = [:]
+    agentsBySurface: [UUID: [TerminalLayoutSnapshot.SurfaceAgentRecord]]? = nil
   ) {
     guard let saveLayoutSnapshot else {
       assertionFailure("saveLayoutSnapshot closure not configured.")
@@ -1043,6 +1282,13 @@ final class WorktreeTerminalManager {
     (runtime.unfocusedSplitFill(), runtime.unfocusedSplitOverlayOpacity())
   }
 
+  // The user's `split-divider-color`, or the opaque asset fallback when unset.
+  // Opaque, not a system separator: the terminal body is cut out of the window
+  // tint, so a translucent divider would let the window blur show through the gap.
+  func splitDividerColor() -> Color {
+    runtime.splitDividerColor() ?? Color(.splitDivider)
+  }
+
   private func emit(_ event: TerminalClient.Event) {
     guard let eventContinuation else {
       bufferPendingEvent(event)
@@ -1060,8 +1306,52 @@ final class WorktreeTerminalManager {
     let result = eventContinuation.yield(event)
     if case .dropped(let shed) = result {
       terminalLogger.error(
-        "Terminal event buffer full (cap \(Self.eventBufferCap)); shed oldest buffered event: \(Self.label(for: shed))."
+        "Terminal event buffer full (cap \(eventBufferCap)); shed oldest buffered event: \(Self.label(for: shed))."
       )
+      invalidateDedupe(for: shed)
+      scheduleShedProjectionReplay(for: shed)
+    }
+  }
+
+  /// Redeliver a shed projection next tick; shedding cleared its dedupe entry
+  /// without reaching TCA, so the row would otherwise stay stale (#573).
+  private func scheduleShedProjectionReplay(for shed: TerminalClient.Event) {
+    guard case .worktreeProjectionChanged(let worktreeID, _) = shed else { return }
+    // A replay that itself sheds must not chain another, or a persistently full
+    // buffer would loop and evict live events every tick (#573).
+    guard !isDrainingShedProjectionReplays else { return }
+    let wasIdle = pendingShedProjectionReplays.isEmpty
+    pendingShedProjectionReplays.insert(worktreeID)
+    guard wasIdle else { return }
+    Task { @MainActor [weak self] in self?.drainShedProjectionReplays() }
+  }
+
+  private func drainShedProjectionReplays() {
+    let ids = pendingShedProjectionReplays
+    pendingShedProjectionReplays.removeAll()
+    isDrainingShedProjectionReplays = true
+    defer { isDrainingShedProjectionReplays = false }
+    for id in ids {
+      emitProjection(for: id)
+    }
+  }
+
+  /// A shed event never reached the consumer, so its dedupe entries must not
+  /// suppress the next identical emit (#573).
+  private func invalidateDedupe(for shed: TerminalClient.Event) {
+    guard let key = Self.coalesceKey(for: shed) else { return }
+    lastEmittedCoalescable.removeValue(forKey: key)
+    switch shed {
+    case .worktreeProjectionChanged(let worktreeID, _):
+      lastEmittedProjections.removeValue(forKey: worktreeID)
+    case .notificationIndicatorChanged:
+      lastNotificationIndicatorCount = nil
+    case .terminalHasAnySurfaceChanged(let hasAny):
+      // Invert instead of nil: the gate defaults nil to false, which would
+      // mask a shed `false` and strand a consumer at `true`.
+      lastEmittedHasAnyTerminalSurface = !hasAny
+    default:
+      break
     }
   }
 
@@ -1105,15 +1395,14 @@ final class WorktreeTerminalManager {
   /// already cleared the coalesce keys, which this re-clears as a guard against drift.
   private func invalidateCaches(forPrunedWorktree id: Worktree.ID) {
     lastEmittedProjections.removeValue(forKey: id)
+    pendingShedProjectionReplays.remove(id)
     for key in Self.invalidatedCoalesceKeys(by: .worktreeStateTornDown(worktreeID: id)) {
       lastEmittedCoalescable.removeValue(forKey: key)
     }
   }
 
   private func emitNotificationIndicatorCountIfNeeded() {
-    let count = states.values.reduce(0) { count, state in
-      count + (state.hasUnseenNotification ? 1 : 0)
-    }
+    let count = states.values.reduce(0) { $0 + $1.totalUnseenNotificationCount }
     if count != lastNotificationIndicatorCount {
       lastNotificationIndicatorCount = count
       emit(.notificationIndicatorChanged(count: count))
@@ -1130,6 +1419,28 @@ final class WorktreeTerminalManager {
     guard hasAny != previous else { return }
     lastEmittedHasAnyTerminalSurface = hasAny
     emit(.terminalHasAnySurfaceChanged(hasAny: hasAny))
+  }
+
+  /// Runs `stop` on the worktree's existing terminal state, never minting one.
+  /// A miss with a live state means the caller acted on a stale mirror, so force
+  /// a fresh projection emit past the dedupe cache to reconcile it (#573).
+  private func stopBlockingScripts(in worktree: Worktree, using stop: (WorktreeTerminalState) -> Bool) {
+    guard let state = stateIfExists(for: worktree.id) else {
+      terminalLogger.warning("Stop requested for \(worktree.id) with no terminal state")
+      return
+    }
+    guard !stop(state) else { return }
+    terminalLogger.warning("Stop requested for \(worktree.id) with no matching script; re-emitting projection")
+    forceEmitProjection(for: worktree.id)
+  }
+
+  /// Re-delivers a worktree's projection past both dedupe layers, so a row that
+  /// diverged from the cache (a reducer-side archived-strip) is reconciled even
+  /// when the projection value is unchanged (#573).
+  private func forceEmitProjection(for id: Worktree.ID) {
+    lastEmittedProjections.removeValue(forKey: id)
+    lastEmittedCoalescable.removeValue(forKey: .worktreeProjection(id))
+    emitProjection(for: id)
   }
 
   /// Builds the row projection and emits only when it diverges from the last

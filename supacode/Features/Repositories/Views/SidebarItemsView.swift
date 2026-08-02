@@ -16,7 +16,6 @@ struct SidebarItemsView: View {
   /// joined with `commandKeyObserver.isPressed` + shortcut overrides at the
   /// `SidebarListView` level. `nil` here means "no hint to render".
   let shortcutHintByID: [Worktree.ID: String]
-  let selectedWorktreeIDs: Set<Worktree.ID>
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
   @Shared(.sidebarNestWorktreesByBranch) private var nestWorktreesByBranch: Bool
@@ -26,7 +25,6 @@ struct SidebarItemsView: View {
     SidebarItemsDragOverlay(
       repository: repository,
       groups: groups,
-      selectedWorktreeIDs: selectedWorktreeIDs,
       store: store,
       terminalManager: terminalManager,
       isRepositoryRemoving: isRepositoryRemoving,
@@ -41,7 +39,6 @@ struct SidebarItemsView: View {
 private struct SidebarItemsDragOverlay: View {
   let repository: Repository
   let groups: [SidebarItemGroup]
-  let selectedWorktreeIDs: Set<Worktree.ID>
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
   let isRepositoryRemoving: Bool
@@ -53,7 +50,6 @@ private struct SidebarItemsDragOverlay: View {
       SidebarItemGroupView(
         repository: repository,
         rowIDs: group.rowIDs,
-        selectedWorktreeIDs: selectedWorktreeIDs,
         store: store,
         terminalManager: terminalManager,
         isRepositoryRemoving: isRepositoryRemoving,
@@ -69,7 +65,6 @@ private struct SidebarItemsDragOverlay: View {
 private struct SidebarItemGroupView: View {
   let repository: Repository
   let rowIDs: [SidebarItemID]
-  let selectedWorktreeIDs: Set<Worktree.ID>
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
   let isRepositoryRemoving: Bool
@@ -109,7 +104,6 @@ private struct SidebarItemGroupView: View {
           row: row,
           store: store,
           terminalManager: terminalManager,
-          selectedWorktreeIDs: selectedWorktreeIDs,
           isRepositoryRemoving: isRepositoryRemoving,
           hideSubtitle: hideSubtitle,
           moveMode: .alwaysDisabled,
@@ -125,7 +119,6 @@ private struct SidebarItemGroupView: View {
             row: row,
             store: store,
             terminalManager: terminalManager,
-            selectedWorktreeIDs: selectedWorktreeIDs,
             isRepositoryRemoving: isRepositoryRemoving,
             hideSubtitle: hideSubtitle,
             moveMode: .alwaysDisabled,
@@ -140,7 +133,6 @@ private struct SidebarItemGroupView: View {
             row: row,
             store: store,
             terminalManager: terminalManager,
-            selectedWorktreeIDs: selectedWorktreeIDs,
             isRepositoryRemoving: isRepositoryRemoving,
             hideSubtitle: hideSubtitle,
             moveMode: .conditional,
@@ -218,7 +210,6 @@ private struct SidebarBranchNestingRowView: View {
   let row: SidebarBranchNesting.Row
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
-  let selectedWorktreeIDs: Set<Worktree.ID>
   let isRepositoryRemoving: Bool
   let hideSubtitle: Bool
   let moveMode: SidebarRowMoveMode
@@ -231,7 +222,6 @@ private struct SidebarBranchNestingRowView: View {
         rowID: id,
         store: store,
         terminalManager: terminalManager,
-        selectedWorktreeIDs: selectedWorktreeIDs,
         isRepositoryRemoving: isRepositoryRemoving,
         hideSubtitle: hideSubtitle,
         moveMode: moveMode,
@@ -290,7 +280,10 @@ private struct SidebarPathGroupHeaderRow: View {
           .foregroundStyle(.secondary)
           .rotationEffect(.degrees(isCollapsed ? 0 : 90))
           .animation(.easeInOut(duration: 0.15), value: isCollapsed)
-          .frame(width: 12)
+          .frame(width: SidebarNestLayout.groupChevronWidth)
+          .padding(
+            .trailing, SidebarNestLayout.leadingSlotWidth - SidebarNestLayout.groupChevronWidth
+          )
           .accessibilityHidden(true)
         Text(label)
           .font(.body)
@@ -409,7 +402,6 @@ struct SidebarItemRow: View {
   let rowID: SidebarItemID
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
-  let selectedWorktreeIDs: Set<Worktree.ID>
   let isRepositoryRemoving: Bool
   let hideSubtitle: Bool
   let moveMode: SidebarRowMoveMode
@@ -426,7 +418,6 @@ struct SidebarItemRow: View {
         store: itemStore,
         parentStore: store,
         terminalManager: terminalManager,
-        selectedWorktreeIDs: selectedWorktreeIDs,
         isRepositoryRemoving: isRepositoryRemoving,
         hideSubtitle: hideSubtitle,
         moveMode: moveMode,
@@ -443,7 +434,6 @@ private struct SidebarItemContainer: View {
   let store: StoreOf<SidebarItemFeature>
   @Bindable var parentStore: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
-  let selectedWorktreeIDs: Set<Worktree.ID>
   let isRepositoryRemoving: Bool
   let hideSubtitle: Bool
   let moveMode: SidebarRowMoveMode
@@ -458,7 +448,6 @@ private struct SidebarItemContainer: View {
       store: store,
       parentStore: parentStore,
       terminalManager: terminalManager,
-      selectedWorktreeIDs: selectedWorktreeIDs,
       isRepositoryRemoving: isRepositoryRemoving,
       hideSubtitle: hideSubtitle,
       moveMode: moveMode,
@@ -475,7 +464,6 @@ private struct SidebarItemBody: View {
   let store: StoreOf<SidebarItemFeature>
   @Bindable var parentStore: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
-  let selectedWorktreeIDs: Set<Worktree.ID>
   let isRepositoryRemoving: Bool
   let hideSubtitle: Bool
   let moveMode: SidebarRowMoveMode
@@ -511,6 +499,9 @@ private struct SidebarItemBody: View {
           "No terminal state for worktree \(rowID) when focusing notification \(notification.surfaceID).")
         return
       }
+      // Without selecting the row first the jump lands in an off-screen worktree,
+      // marking the notification read on a pane the user never sees.
+      parentStore.send(.selectWorktree(rowID, focusTerminal: true))
       if !terminalState.focusSurface(id: notification.surfaceID) {
         notificationLogger.warning("Failed to focus surface \(notification.surfaceID) for worktree \(rowID).")
       }
@@ -520,17 +511,14 @@ private struct SidebarItemBody: View {
     .typeSelectEquivalent("")
     .moveDisabled(moveDisabled)
     .contextMenu {
-      let isRemovable = store.lifecycle == .idle
-      if isRemovable, let worktree = parentStore.state.worktree(for: rowID), !isRepositoryRemoving {
-        SidebarItemContextMenu(
-          worktree: worktree,
-          rowID: rowID,
-          rowKind: store.kind,
-          repositoryID: store.repositoryID,
-          store: parentStore,
-          selectedWorktreeIDs: selectedWorktreeIDs
-        )
-      }
+      // Every field the menu branches on lives on the leaf, so the row body never
+      // resolves a `Worktree` from the parent (which would observation-track the
+      // whole repository roster from every row).
+      SidebarItemContextMenu(
+        row: SidebarContextRow(store.state),
+        isRepositoryRemoving: isRepositoryRemoving,
+        store: parentStore
+      )
     }
     .disabled(isRepositoryRemoving && store.lifecycle != .idle)
     .contentShape(.dragPreview, .rect)
@@ -558,7 +546,6 @@ struct SidebarFolderRow: View {
   let repository: Repository
   let rowID: Worktree.ID
   let shortcutHint: String?
-  let selectedWorktreeIDs: Set<Worktree.ID>
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
 
@@ -568,7 +555,6 @@ struct SidebarFolderRow: View {
       rowID: rowID,
       store: store,
       terminalManager: terminalManager,
-      selectedWorktreeIDs: selectedWorktreeIDs,
       isRepositoryRemoving: isRepositoryRemoving,
       hideSubtitle: true,
       moveMode: .alwaysEnabled,
@@ -577,49 +563,79 @@ struct SidebarFolderRow: View {
   }
 }
 
+/// The one action that always applies, so a right-click is never a dead click.
+private struct SidebarCopyPathnameButton: View {
+  let path: String
+
+  var body: some View {
+    Button("Copy as Pathname", systemImage: "doc.on.doc") {
+      NSPasteboard.general.clearContents()
+      NSPasteboard.general.setString(path, forType: .string)
+    }
+  }
+}
+
 private struct SidebarItemContextMenu: View {
-  let worktree: Worktree
-  let rowID: SidebarItemID
-  let rowKind: SidebarItemFeature.State.Kind
-  let repositoryID: Repository.ID
+  /// The right-clicked row, projected from its own leaf store. Sole input: the
+  /// menu resolves nothing from the parent's repository roster.
+  let row: SidebarContextRow
+  let isRepositoryRemoving: Bool
   @Bindable var store: StoreOf<RepositoriesFeature>
-  let selectedWorktreeIDs: Set<Worktree.ID>
   @Shared(.settingsFile) private var settingsFile
 
-  private var rowIsFolder: Bool { rowKind == .folder }
+  private var rowID: SidebarItemID { row.id }
+  private var repositoryID: Repository.ID { row.repositoryID }
+  private var rowIsFolder: Bool { row.isFolder }
 
-  private var contextRows: [SidebarItemFeature.State] {
-    guard selectedWorktreeIDs.count > 1, selectedWorktreeIDs.contains(rowID) else {
-      return store.state.selectedRow(for: rowID).map { [$0] } ?? []
-    }
-    let rows = selectedWorktreeIDs.compactMap { store.state.selectedRow(for: $0) }
-    return rows
-  }
+  /// A terminating row, or one whose repository is being removed, has nothing
+  /// left to act on beyond copying its path; `body`'s reduced branch adds the
+  /// pin toggle back for still-creating rows.
+  private var isActionable: Bool { row.lifecycle == .idle && !isRepositoryRemoving }
 
-  /// Mixed-kind bulk selections surface no menu; per-kind actions don't compose.
-  private var hasMixedKindSelection: Bool {
-    contextRows.count > 1 && Set(contextRows.map(\.kind)).count > 1
-  }
-
-  private var isAllFoldersBulk: Bool {
-    contextRows.count > 1 && contextRows.allSatisfy(\.isFolder)
-  }
-
+  /// Resolved off the main actor by `.resolveOpenActions`: the repository-settings
+  /// shared key caches its reference weakly, so reading it from here would re-run
+  /// the key's disk load on every menu build. The fallback covers the window before
+  /// the first resolution lands, and only ever offers an installed editor.
   private var openActionSelection: OpenWorktreeAction {
-    @Shared(.repositorySettings(worktree.repositoryRootURL, host: worktree.host)) var repositorySettings
-    return OpenWorktreeAction.fromSettingsID(
-      repositorySettings.openActionID,
-      defaultEditorID: settingsFile.global.defaultEditorID
-    )
+    store.openActionByRepositoryID[repositoryID]
+      ?? OpenWorktreeAction.unresolvedDefault(
+        defaultEditorID: settingsFile.global.defaultEditorID,
+        installed: store.installedOpenActions
+      )
   }
 
   var body: some View {
-    if hasMixedKindSelection {
-      EmptyView()
+    // Reducer-cached: resolving the selected rows here would read
+    // `sidebarItems[id:]` per row and observation-track the whole List.
+    let slice = store.sidebarSelectionSlice
+    let contextRows = slice.contextRows(rightClicked: row)
+    let isBulkSelection = contextRows.count > 1
+    if !isActionable {
+      // Mirror the actionable path's mixed-selection suppression.
+      if row.lifecycle.isPending, !isRepositoryRemoving, !(isBulkSelection && slice.hasMixedKindSelection) {
+        pinActions(contextRows: contextRows, isBulkSelection: isBulkSelection)
+      }
+      SidebarCopyPathnameButton(path: row.workingDirectoryPath)
+      // Materialized rows running their setup script share the `.pending`
+      // lifecycle but are past cancelling; gate on the throwaway id.
+      if !isBulkSelection, rowID.isPending, !isRepositoryRemoving {
+        Divider()
+        Button("Cancel Creation", systemImage: "xmark.circle", role: .destructive) {
+          store.send(.cancelPendingWorktree(rowID))
+        }
+        .help("Stop creating this worktree and clean up its files and branch")
+      }
+    } else if isBulkSelection, slice.hasMixedKindSelection {
+      // Folder and worktree actions don't compose, so the selection has none in
+      // common; say so instead of putting up an empty menu.
+      Button("No Actions for Mixed Selection") {}
+        .disabled(true)
+        .help("Folders and worktrees share no actions. Select one kind at a time.")
     } else {
       menuContents(
         contextRows: contextRows,
-        isBulkSelection: contextRows.count > 1,
+        isBulkSelection: isBulkSelection,
+        isAllFoldersBulk: isBulkSelection && slice.isAllFoldersBulk,
         overrides: settingsFile.global.shortcutOverrides
       )
     }
@@ -627,19 +643,19 @@ private struct SidebarItemContextMenu: View {
 
   @ViewBuilder
   private func menuContents(
-    contextRows: [SidebarItemFeature.State],
+    contextRows: [SidebarContextRow],
     isBulkSelection: Bool,
+    isAllFoldersBulk: Bool,
     overrides: [AppShortcutID: AppShortcutOverride]
   ) -> some View {
     let archiveShortcut = AppShortcuts.archiveWorktree.effective(from: overrides)
     let deleteShortcut = AppShortcuts.deleteWorktree.effective(from: overrides)
-    let isAllFoldersBulk = isAllFoldersBulk
     let vocab = store.state.worktreeVocabulary(forRepository: repositoryID)
 
     // Open actions stay shown for a remote row but `openActions` gates each
     // editor per-item via `canOpen` (Reveal in Finder is local-only), so no
     // blanket disable here.
-    if !isBulkSelection, !worktree.isMissing {
+    if !isBulkSelection, !row.isMissing {
       openActions(overrides: overrides)
       Divider()
     }
@@ -647,24 +663,16 @@ private struct SidebarItemContextMenu: View {
     pinActions(contextRows: contextRows, isBulkSelection: isBulkSelection)
 
     if !isBulkSelection {
-      Button("Copy as Pathname", systemImage: "doc.on.doc") {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(worktree.workingDirectory.path, forType: .string)
-      }
+      SidebarCopyPathnameButton(path: row.workingDirectoryPath)
       if !rowIsFolder {
         Button(vocab.copyAsBranchName) {
           NSPasteboard.general.clearContents()
-          NSPasteboard.general.setString(worktree.name, forType: .string)
+          NSPasteboard.general.setString(row.name, forType: .string)
         }
       }
-      if let singleRow = contextRows.first,
-        !rowIsFolder,
-        singleRow.lifecycle == .idle,
-        !worktree.isMissing,
-        worktree.isAttached
-      {
+      if !rowIsFolder, !row.isMissing, row.isAttached {
         Button(vocab.renameBranch, systemImage: "pencil") {
-          store.send(.requestRenameBranch(worktree.id, repositoryID))
+          store.send(.requestRenameBranch(rowID, repositoryID))
         }
         .help(
           vocab.isJJ
@@ -689,16 +697,16 @@ private struct SidebarItemContextMenu: View {
         .help("Open folder settings")
         // Remote folders have no section header either, so the connection editor
         // (offered on a git remote's section menu) lives here for them.
-        if worktree.host != nil {
+        if row.host != nil {
           Button("Edit Connection…", systemImage: "wifi") {
             store.send(.requestEditRemoteRepository(repositoryID))
           }
           .help("Edit the SSH server, port, user, or path")
         }
         Divider()
-      } else if let row = contextRows.first,
-        !row.isMainWorktree,
-        !row.lifecycle.isPending
+      } else if let singleRow = contextRows.first,
+        !singleRow.isMainWorktree,
+        !singleRow.lifecycle.isPending
       {
         Button("Customize Appearance…", systemImage: "paintbrush") {
           store.send(.requestCustomizeWorktree(rowID, repositoryID))
@@ -719,7 +727,7 @@ private struct SidebarItemContextMenu: View {
 
   @ViewBuilder
   private func archiveAndDeleteActions(
-    contextRows: [SidebarItemFeature.State],
+    contextRows: [SidebarContextRow],
     isBulkSelection: Bool,
     isAllFoldersBulk: Bool,
     archiveShortcut: AppShortcut?,
@@ -753,7 +761,7 @@ private struct SidebarItemContextMenu: View {
       }
       .appKeyboardShortcut(archiveShortcut)
     }
-    if !isBulkSelection, rowIsFolder, worktree.host != nil {
+    if !isBulkSelection, rowIsFolder, row.host != nil {
       // A remote folder is the remote repository; its row has no section header,
       // so removal lives here and must drop the config (the local delete
       // pipeline only prunes local roots and would leave the config to reappear).
@@ -775,11 +783,12 @@ private struct SidebarItemContextMenu: View {
   }
 
   @ViewBuilder
-  private func pinActions(contextRows: [SidebarItemFeature.State], isBulkSelection: Bool) -> some View {
+  private func pinActions(contextRows: [SidebarContextRow], isBulkSelection: Bool) -> some View {
     // Folder synthetic rows pass `isMainWorktree` by geometry but are pinnable; git "main" still
-    // aren't. Pending rows can't pin (reducer would no-op on the unresolved ID).
+    // aren't. Pending rows pin too: the reducer parks the intent on the
+    // `PendingWorktree` and lands it when the worktree materializes.
     let pinnableRows = contextRows.filter {
-      (!$0.isMainWorktree || $0.isFolder) && !$0.lifecycle.isPending
+      !$0.isMainWorktree || $0.isFolder
     }
     if !pinnableRows.isEmpty {
       let allPinned = pinnableRows.allSatisfy(\.isPinned)
@@ -811,15 +820,16 @@ private struct SidebarItemContextMenu: View {
 
   @ViewBuilder
   private func openActions(overrides: [AppShortcutID: AppShortcutOverride]) -> some View {
-    let availableActions = OpenWorktreeAction.availableCases.filter { $0 != .finder }
-    let resolved = OpenWorktreeAction.availableSelection(openActionSelection)
+    let installed = store.installedOpenActions
+    let availableActions = installed.filter { $0 != .finder }
+    let resolved = OpenWorktreeAction.availableSelection(openActionSelection, installed: installed)
     let primarySelection = resolved == .finder ? availableActions.first : resolved
     let openShortcut = AppShortcuts.openWorktree.effective(from: overrides)
     let revealShortcut = AppShortcuts.revealInFinder.effective(from: overrides)
 
     if let primarySelection {
       Button("Open with \(primarySelection.labelTitle)", systemImage: "arrow.up.right.square") {
-        store.send(.contextMenuOpenWorktree(worktree.id, primarySelection))
+        store.send(.contextMenuOpenWorktree(rowID, primarySelection))
       }
       .appKeyboardShortcut(openShortcut)
       .help("Open with \(primarySelection.labelTitle) (\(openShortcut?.display ?? "none"))")
@@ -829,7 +839,7 @@ private struct SidebarItemContextMenu: View {
     Menu("Open With") {
       ForEach(availableActions) { action in
         Button {
-          store.send(.contextMenuOpenWorktree(worktree.id, action))
+          store.send(.contextMenuOpenWorktree(rowID, action))
         } label: {
           OpenWorktreeActionMenuLabelView(action: action)
         }
@@ -839,26 +849,26 @@ private struct SidebarItemContextMenu: View {
     }
 
     Button("Reveal in Finder", systemImage: "folder") {
-      store.send(.contextMenuOpenWorktree(worktree.id, .finder))
+      store.send(.contextMenuOpenWorktree(rowID, .finder))
     }
     .appKeyboardShortcut(revealShortcut)
     .help("Reveal in Finder (\(revealShortcut?.display ?? "none"))")
-    .disabled(worktree.host != nil)
+    .disabled(row.host != nil)
   }
 
   /// Whether `action` can open this row: local opens everywhere, remote only
   /// via an editor whose Remote-SSH CLI can express the host.
   private func canOpen(_ action: OpenWorktreeAction) -> Bool {
-    guard let host = worktree.host else { return true }
-    return action.remoteOpenInvocation(host: host, remotePath: worktree.location.workingDirectoryPath) != nil
+    guard let host = row.host else { return true }
+    return action.remoteOpenInvocation(host: host, remotePath: row.workingDirectoryPath) != nil
   }
 
   /// Tooltip for an "Open With" entry. A disabled VS Code family row on a
   /// non-default-port host explains the `~/.ssh/config` requirement; otherwise
   /// falls back to the plain action label.
   private func openActionHelp(for action: OpenWorktreeAction) -> String {
-    if let host = worktree.host,
-      let reason = action.remoteOpenDisabledReason(host: host, remotePath: worktree.location.workingDirectoryPath)
+    if let host = row.host,
+      let reason = action.remoteOpenDisabledReason(host: host, remotePath: row.workingDirectoryPath)
     {
       return reason
     }

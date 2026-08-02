@@ -22,6 +22,8 @@ struct WorktreeCreationPromptFeature {
     var branchMenu: BaseRefBranchMenu?
     var branchName: String
     var selectedBaseRef: String?
+    /// Upstream tracking for the new branch; `.automatic` leaves it to Git.
+    var selectedUpstream: WorktreeUpstreamPreference = .automatic
     var fetchOrigin: Bool
     /// Resolved default base directory, used to compute the location preview.
     let defaultWorktreeBaseDirectory: String
@@ -78,6 +80,26 @@ struct WorktreeCreationPromptFeature {
       return automaticBaseRef.isEmpty ? "Auto" : automaticBaseRef
     }
 
+    /// Label shown on the upstream menu button.
+    var upstreamMenuLabel: String {
+      switch selectedUpstream {
+      case .automatic: "Auto"
+      case .unset: "None"
+      case .branch(let ref): ref
+      }
+    }
+
+    /// The explicitly chosen upstream branch, for selection marks in the picker.
+    var selectedUpstreamBranch: String? {
+      guard case .branch(let ref) = selectedUpstream else { return nil }
+      return ref
+    }
+
+    /// The upstream picker only offers remote-tracking branches.
+    var upstreamBranchMenu: BaseRefBranchMenu? {
+      branchMenu?.remotesOnly()
+    }
+
     var isLoadingBranches: Bool {
       branchMenu == nil
     }
@@ -97,6 +119,7 @@ struct WorktreeCreationPromptFeature {
   enum Action: BindableAction, Equatable {
     case binding(BindingAction<State>)
     case baseRefSelected(String?)
+    case upstreamSelected(WorktreeUpstreamPreference)
     case cancelButtonTapped
     case createButtonTapped
     case setValidationMessage(String?)
@@ -111,6 +134,7 @@ struct WorktreeCreationPromptFeature {
       repositoryID: Repository.ID,
       branchName: String,
       baseRef: String?,
+      upstream: WorktreeUpstreamPreference,
       fetchOrigin: Bool,
       placement: WorktreePlacementOverride,
       title: String?,
@@ -128,6 +152,11 @@ struct WorktreeCreationPromptFeature {
 
       case .baseRefSelected(let ref):
         state.selectedBaseRef = ref
+        state.validationMessage = nil
+        return .none
+
+      case .upstreamSelected(let upstream):
+        state.selectedUpstream = upstream
         state.validationMessage = nil
         return .none
 
@@ -163,6 +192,7 @@ struct WorktreeCreationPromptFeature {
               repositoryID: state.repositoryID,
               branchName: trimmed,
               baseRef: state.selectedBaseRef,
+              upstream: state.selectedUpstream,
               // Match the disabled toggle: a local base ref has nothing to fetch.
               fetchOrigin: state.isSelectedBaseRefLocal ? false : state.fetchOrigin,
               placement: WorktreePlacementOverride(

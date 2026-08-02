@@ -1,3 +1,4 @@
+import AppKit
 import Sharing
 import SwiftUI
 
@@ -5,8 +6,9 @@ import SwiftUI
 
 // Compile-time checkable shortcut identifier.
 public nonisolated enum AppShortcutID: Codable, Hashable, Sendable, CodingKeyRepresentable {
-  case commandPalette, openSettings, checkForUpdates, showMainWindow
+  case commandPalette, worktreeSwitcher, openSettings, checkForUpdates, showMainWindow
   case toggleLeftSidebar, revealInSidebar
+  case expandAllSidebarGroups, collapseAllSidebarGroups
   case newWorktree, refreshWorktrees, archivedWorktrees, archiveWorktree
   case deleteWorktree, confirmWorktreeAction
   case selectNextWorktree, selectPreviousWorktree
@@ -38,11 +40,14 @@ public nonisolated enum AppShortcutID: Codable, Hashable, Sendable, CodingKeyRep
   private var stableKey: String {
     switch self {
     case .commandPalette: "commandPalette"
+    case .worktreeSwitcher: "worktreeSwitcher"
     case .openSettings: "openSettings"
     case .checkForUpdates: "checkForUpdates"
     case .showMainWindow: "showMainWindow"
     case .toggleLeftSidebar: "toggleLeftSidebar"
     case .revealInSidebar: "revealInSidebar"
+    case .expandAllSidebarGroups: "expandAllSidebarGroups"
+    case .collapseAllSidebarGroups: "collapseAllSidebarGroups"
     case .newWorktree: "newWorktree"
     case .refreshWorktrees: "refreshWorktrees"
     case .archivedWorktrees: "archivedWorktrees"
@@ -72,11 +77,14 @@ public nonisolated enum AppShortcutID: Codable, Hashable, Sendable, CodingKeyRep
 
   private static let stableKeyMap: [String: AppShortcutID] = [
     "commandPalette": .commandPalette,
+    "worktreeSwitcher": .worktreeSwitcher,
     "openSettings": .openSettings,
     "checkForUpdates": .checkForUpdates,
     "showMainWindow": .showMainWindow,
     "toggleLeftSidebar": .toggleLeftSidebar,
     "revealInSidebar": .revealInSidebar,
+    "expandAllSidebarGroups": .expandAllSidebarGroups,
+    "collapseAllSidebarGroups": .collapseAllSidebarGroups,
     "newWorktree": .newWorktree,
     "refreshWorktrees": .refreshWorktrees,
     "archivedWorktrees": .archivedWorktrees,
@@ -123,11 +131,14 @@ public nonisolated enum AppShortcutID: Codable, Hashable, Sendable, CodingKeyRep
   public var displayName: String {
     switch self {
     case .commandPalette: "Command Palette"
+    case .worktreeSwitcher: "Go to Worktree"
     case .openSettings: "Open Settings"
     case .checkForUpdates: "Check For Updates"
     case .showMainWindow: "Show Main Window"
     case .toggleLeftSidebar: "Toggle Left Sidebar"
     case .revealInSidebar: "Reveal in Sidebar"
+    case .expandAllSidebarGroups: "Expand All Sidebar Groups"
+    case .collapseAllSidebarGroups: "Collapse All Sidebar Groups"
     case .newWorktree: "New Worktree"
     case .refreshWorktrees: "Refresh Worktrees"
     case .archivedWorktrees: "Archived Worktrees"
@@ -165,6 +176,10 @@ public struct AppShortcut: Identifiable {
   public let keyEquivalent: KeyEquivalent
   public let modifiers: EventModifiers
   private let keyCode: UInt16?
+  // True when the key code came from a rebind, where it is the physical key the user
+  // actually pressed. The defaults instead derive theirs from a character, so theirs is
+  // only ever as good as the layout that was active when the shortcut was built.
+  private let keyCodeIsExplicit: Bool
   private let ghosttyKeyName: String
   // Whether the binding is active with no user override; `false` ships the
   // shortcut as a rebindable option that stays off until the user enables it.
@@ -175,6 +190,7 @@ public struct AppShortcut: Identifiable {
     self.keyEquivalent = KeyEquivalent(key)
     self.modifiers = modifiers
     self.isEnabledByDefault = isEnabledByDefault
+    self.keyCodeIsExplicit = false
     let code = AppShortcutOverride.keyCode(forDisplayedKeyEquivalent: key) ?? AppShortcutOverride.keyCode(for: key)
     self.keyCode = code
     if let code {
@@ -196,6 +212,7 @@ public struct AppShortcut: Identifiable {
     self.keyEquivalent = keyEquivalent
     self.modifiers = modifiers
     self.keyCode = nil
+    self.keyCodeIsExplicit = false
     self.ghosttyKeyName = ghosttyKeyName
     self.isEnabledByDefault = isEnabledByDefault
   }
@@ -235,6 +252,36 @@ public struct AppShortcut: Identifiable {
     return AppShortcut(id: id, override: override)
   }
 
+  // Matches a raw key event against this shortcut. Compares key codes rather than
+  // characters so the match survives Caps Lock and Shift, and requires an exact
+  // modifier set so ⌘⇧P never matches a plain ⌘P binding.
+  public func matches(_ event: NSEvent) -> Bool {
+    guard Self.rawModifierFlags(of: event) == rawModifierFlags else { return false }
+    guard let code = resolvedKeyCode else { return false }
+    return event.keyCode == code
+  }
+
+  // A rebind recorded the physical key, so its code is authoritative: reverse-resolving it
+  // from the character would snap a keypad or special key back onto the main-row key that
+  // prints the same thing. A default only carries a character, so its code has to track
+  // the live layout, or an input source switch would strand it on the wrong physical key.
+  // Nil only for the special-key defaults, which no caller matches against.
+  private var resolvedKeyCode: UInt16? {
+    guard !keyCodeIsExplicit else { return keyCode }
+    return AppShortcutOverride.keyCode(forDisplayedKeyEquivalent: keyEquivalent.character) ?? keyCode
+  }
+
+  private static func rawModifierFlags(of event: NSEvent) -> AppShortcutOverride.ModifierFlags {
+    // Drop the incidental `.capsLock` / `.function` / `.numericPad` flags a key carries.
+    let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+    var flags: AppShortcutOverride.ModifierFlags = []
+    if modifiers.contains(.command) { flags.insert(.command) }
+    if modifiers.contains(.option) { flags.insert(.option) }
+    if modifiers.contains(.control) { flags.insert(.control) }
+    if modifiers.contains(.shift) { flags.insert(.shift) }
+    return flags
+  }
+
   // The override that binds this shortcut's default key, enabled. Used to turn on
   // a disabled-by-default shortcut from the settings toggle. nil for special keys
   // with no resolvable key code.
@@ -248,6 +295,7 @@ public struct AppShortcut: Identifiable {
     self.keyEquivalent = override.keyEquivalent
     self.modifiers = override.eventModifiers
     self.keyCode = override.keyCode
+    self.keyCodeIsExplicit = true
     self.ghosttyKeyName = AppShortcutOverride.resolvedGhosttyKeyName(for: override.keyCode)
     self.isEnabledByDefault = true
   }
@@ -311,13 +359,22 @@ public struct AppShortcutGroup: Identifiable {
 public enum AppShortcuts {
   // MARK: - Shortcut definitions.
 
-  public static let commandPalette = AppShortcut(id: .commandPalette, key: "p", modifiers: .command)
+  public static let commandPalette = AppShortcut(id: .commandPalette, key: "p", modifiers: [.command, .shift])
+  public static let worktreeSwitcher = AppShortcut(id: .worktreeSwitcher, key: "p", modifiers: .command)
   public static let openSettings = AppShortcut(id: .openSettings, key: ",", modifiers: .command)
   public static let checkForUpdates = AppShortcut(id: .checkForUpdates, key: "u", modifiers: .command)
   public static let showMainWindow = AppShortcut(id: .showMainWindow, key: "0", modifiers: [.command, .shift])
 
   public static let toggleLeftSidebar = AppShortcut(id: .toggleLeftSidebar, key: "[", modifiers: .command)
   public static let revealInSidebar = AppShortcut(id: .revealInSidebar, key: "e", modifiers: [.command, .shift])
+  // `]` expands (opens rightward), `[` collapses, mirroring the outline-view
+  // Right/Left arrow convention, and pairs with ⌘[ for the sidebar toggle.
+  public static let expandAllSidebarGroups = AppShortcut(
+    id: .expandAllSidebarGroups, key: "]", modifiers: [.command, .control]
+  )
+  public static let collapseAllSidebarGroups = AppShortcut(
+    id: .collapseAllSidebarGroups, key: "[", modifiers: [.command, .control]
+  )
 
   public static let newWorktree = AppShortcut(id: .newWorktree, key: "n", modifiers: .command)
   public static let refreshWorktrees = AppShortcut(id: .refreshWorktrees, key: "r", modifiers: [.command, .shift])
@@ -412,6 +469,12 @@ public enum AppShortcuts {
     return worktreeSelection[index].effective(from: overrides)?.display
   }
 
+  public static func tabSelectionShortcutDisplays(
+    overrides: [AppShortcutID: AppShortcutOverride]
+  ) -> [String?] {
+    tabSelection.map { $0.effective(from: overrides)?.display }
+  }
+
   // Drops disabled bindings and out-of-range slots so neither leaves a stale NSMenuItem keyEquivalent.
   public static func activeWorktreeSelectionSlots(
     overrides: [AppShortcutID: AppShortcutOverride],
@@ -429,9 +492,12 @@ public enum AppShortcuts {
   public static let groups: [AppShortcutGroup] = [
     AppShortcutGroup(
       category: .general,
-      shortcuts: [commandPalette, openSettings, checkForUpdates, showMainWindow]
+      shortcuts: [worktreeSwitcher, commandPalette, openSettings, checkForUpdates, showMainWindow]
     ),
-    AppShortcutGroup(category: .sidebar, shortcuts: [toggleLeftSidebar, revealInSidebar]),
+    AppShortcutGroup(
+      category: .sidebar,
+      shortcuts: [toggleLeftSidebar, revealInSidebar, expandAllSidebarGroups, collapseAllSidebarGroups]
+    ),
     AppShortcutGroup(
       category: .worktrees,
       shortcuts: [

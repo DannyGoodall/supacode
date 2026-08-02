@@ -31,20 +31,7 @@ struct CLIReferenceView: View {
       CLISection(title: "Settings", rows: Self.settingsRows)
       CLISection(title: "Socket", rows: Self.socketRows)
 
-      Section("Flags") {
-        Grid(alignment: .topLeading, horizontalSpacing: 16, verticalSpacing: 8) {
-          ForEach(Self.flagRows) { row in
-            GridRow {
-              Text(row.command)
-                .font(.body.monospaced())
-                .gridColumnAlignment(.leading)
-              Text(row.description)
-                .foregroundStyle(.secondary)
-                .gridColumnAlignment(.leading)
-            }
-          }
-        }
-      }
+      CLISection(title: "Flags", rows: Self.flagRows)
     }
     .textSelection(.enabled)
     .formStyle(.grouped)
@@ -60,7 +47,16 @@ struct CLIReferenceView: View {
   ]
 
   private static let worktreeRows: [CLIEntry] = [
-    .init(command: "supacode worktree list [-f]", description: "List worktree IDs. -f for focused only."),
+    .init(
+      command: "supacode worktree list [-f] [--status <status>] [--not-archived] [--with-status]",
+      description:
+        "List worktree IDs. -f for focused only; --status main|pinned|unpinned|archived "
+        + "or --not-archived filters; --with-status appends a status column."
+    ),
+    .init(
+      command: "supacode worktree status [-w <id>]",
+      description: "Read the worktree's sidebar status, archived flag, and focus."
+    ),
     .init(command: "supacode worktree focus [-w <id>]", description: "Focus a worktree."),
     .init(
       command: "supacode worktree run [-w <id>] [-c <uuid>]",
@@ -74,19 +70,34 @@ struct CLIReferenceView: View {
       command: "supacode worktree script list [-w <id>]",
       description: "List configured scripts. Underlined rows are currently running."
     ),
-    .init(command: "supacode worktree archive [-w <id>]", description: "Archive the worktree."),
+    .init(
+      command: "supacode worktree archive [-w <id>]",
+      description: "Archive the worktree. Targeting the current worktree closes its terminals."
+    ),
     .init(command: "supacode worktree unarchive [-w <id>]", description: "Unarchive the worktree."),
-    .init(command: "supacode worktree delete [-w <id>]", description: "Delete the worktree."),
+    .init(
+      command: "supacode worktree delete [-w <id>]",
+      description: "Delete the worktree. Targeting the current worktree closes its terminals."
+    ),
     .init(command: "supacode worktree pin [-w <id>]", description: "Pin the worktree."),
     .init(command: "supacode worktree unpin [-w <id>]", description: "Unpin the worktree."),
+    .init(
+      command: "supacode worktree appearance [-w <id>] [--title <title>] [--color <value>]",
+      description: "No flags reads stored title/tint overrides plus displayTitle; omitted update flags preserve values."
+    ),
   ]
 
   private static let tabRows: [CLIEntry] = [
     .init(command: "supacode tab list [-w <id>] [-f]", description: "List tab UUIDs. -f for focused only."),
     .init(command: "supacode tab focus [-w <id>] [-t <id>]", description: "Focus a tab."),
     .init(
-      command: "supacode tab new [-w <id>] [-i <cmd>] [-n <uuid>]",
-      description: "Create a new tab. Prints UUID to stdout."
+      command: "supacode tab new [-w <id>] [-i <cmd>] [-n <uuid>] [--title <title>]",
+      description: "Create a tab. Prints UUID to stdout."
+    ),
+    .init(
+      command: "supacode tab rename [-w <id>] [-t <id>] --title <title>",
+      description:
+        "Set the persistent title override; an empty title clears it. Script tabs are locked."
     ),
     .init(command: "supacode tab close [-w <id>] [-t <id>]", description: "Close a tab."),
   ]
@@ -115,9 +126,9 @@ struct CLIReferenceView: View {
     .init(command: "supacode repo open <path>", description: "Open a repository."),
     .init(
       command:
-        "supacode repo worktree-new [-r <id>] [--branch <name>] [--base <ref>] [--fetch] "
-        + "[--name <folder>] [--location <dir>]",
-      description: "Create a worktree in a repository."
+        "supacode repo worktree-new [-r <id>] [--branch <name>] [--base <ref>] "
+        + "[--upstream <ref> | --no-upstream] [--fetch] [--name <folder>] [--location <dir>] [--pin]",
+      description: "Create a worktree. Prints the new worktree ID to stdout."
     ),
   ]
 
@@ -125,6 +136,10 @@ struct CLIReferenceView: View {
     .init(command: "supacode settings", description: "Open settings."),
     .init(command: "supacode settings <section>", description: "Open a specific section."),
     .init(command: "supacode settings repo [-r <id>]", description: "Open repository settings."),
+    .init(
+      command: "supacode settings repo scripts [-r <id>]",
+      description: "Open repository Scripts settings."
+    ),
   ]
 
   private static let socketRows: [CLIEntry] = [
@@ -136,11 +151,19 @@ struct CLIReferenceView: View {
     .init(command: "-t, --tab", description: "Tab UUID. Defaults to $SUPACODE_TAB_ID."),
     .init(command: "-s, --surface", description: "Surface UUID. Defaults to $SUPACODE_SURFACE_ID."),
     .init(command: "-c, --script", description: "Script UUID (for `worktree run`/`stop`)."),
+    .init(
+      command: "--title",
+      description: "Tab title for tab new/rename, or sidebar title for worktree appearance; empty clears."),
+    .init(command: "--color", description: "Sidebar tint override; pass none to clear."),
     .init(command: "-r, --repo", description: "Repository ID. Defaults to $SUPACODE_REPO_ID."),
     .init(command: "-i, --input", description: "Command to run in the terminal."),
     .init(command: "-d, --direction", description: "Split direction: horizontal (h) or vertical (v)."),
     .init(command: "-n, --id", description: "UUID for a new tab or surface."),
     .init(command: "-f, --focused", description: "Print only the focused item in list commands."),
+    .init(
+      command: "--background",
+      description: "Leave the selection and focus alone; new tabs and splits stay in the background."
+    ),
   ]
 }
 

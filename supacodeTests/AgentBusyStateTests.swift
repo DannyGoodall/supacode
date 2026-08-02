@@ -1,7 +1,9 @@
+import ComposableArchitecture
 import ConcurrencyExtras
 import Dependencies
 import DependenciesTestSupport
 import Foundation
+import GhosttyKit
 import SupacodeSettingsShared
 import Testing
 
@@ -99,6 +101,120 @@ struct AgentBusyStateTests {
     // Clear the other: now idle.
     emit(.idle, surfaceID: surfaceB.id)
     #expect(!presence.state.hasActivity(in: surfaces))
+  }
+
+  @Test func workspaceProgressRollsUpFromEveryTab() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+
+    manager.handleCommand(.runBlockingScript(worktree, kind: .archive, script: "echo a"))
+    manager.handleCommand(.runBlockingScript(worktree, kind: .delete, script: "echo b"))
+
+    guard let state = manager.stateIfExists(for: worktree.id) else {
+      Issue.record("Expected worktree state")
+      return
+    }
+    let tabs = state.tabManager.tabs.map(\.id)
+    guard tabs.count == 2,
+      let surfaceA = state.splitTree(for: tabs[0]).root?.leftmostLeaf(),
+      let surfaceB = state.splitTree(for: tabs[1]).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected one surface in each tab")
+      return
+    }
+
+    #expect(state.currentTabProjections().allSatisfy { $0.hasTerminalActivity })
+    #expect(state.currentProjection().isProgressBusy)
+
+    surfaceA.bridge.onCommandFinished?(0)
+    #expect(
+      state.currentTabProjections().first(where: { $0.tabID == tabs[0] })?.hasTerminalActivity == false
+    )
+    #expect(
+      state.currentTabProjections().first(where: { $0.tabID == tabs[1] })?.hasTerminalActivity == true
+    )
+    #expect(state.currentProjection().isProgressBusy)
+
+    surfaceB.bridge.onCommandFinished?(0)
+    #expect(state.currentTabProjections().allSatisfy { !$0.hasTerminalActivity })
+    #expect(!state.currentProjection().isProgressBusy)
+  }
+
+  @Test func closingFinalBusySurfaceEmitsIdle() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    var statuses: [WorktreeTaskStatus] = []
+    state.onTaskStatusChanged = { statuses.append($0) }
+
+    manager.handleCommand(.runBlockingScript(worktree, kind: .archive, script: "echo busy"))
+    guard
+      let tabID = state.tabManager.tabs.first?.id,
+      let surface = state.splitTree(for: tabID).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a busy tab with one surface")
+      return
+    }
+    #expect(statuses == [.running])
+
+    // Closing must not rely on Ghostty delivering another terminal-state callback.
+    surface.bridge.onProgressReport = nil
+    surface.bridge.onCommandFinished = nil
+    surface.bridge.onChildExited = nil
+    surface.bridge.closeSurface(processAlive: false)
+
+    #expect(statuses == [.running, .idle])
+  }
+
+  @Test func tabStaysBusyUntilEverySplitPaneIdles() {
+    let manager = WorktreeTerminalManager(runtime: GhosttyRuntime())
+    let worktree = makeWorktree()
+    let state = manager.state(for: worktree)
+    guard
+      let tab = state.createTab(),
+      let first = state.splitTree(for: tab).root?.leftmostLeaf()
+    else {
+      Issue.record("Expected a tab with one surface")
+      return
+    }
+    _ = state.performSplitAction(.newSplit(direction: .right), for: first.id)
+    let leaves = state.splitTree(for: tab).leaves()
+    guard leaves.count == 2 else {
+      Issue.record("Expected two surfaces in one tab")
+      return
+    }
+
+    // Both panes report running progress: the tab is busy. Any wired leaf's
+    // report re-runs the tab's worst-of aggregate, so drive them all through
+    // the first pane.
+    for leaf in leaves { leaf.bridge.state.progressState = GHOSTTY_PROGRESS_STATE_INDETERMINATE }
+    leaves[0].bridge.onProgressReport?(GHOSTTY_PROGRESS_STATE_INDETERMINATE)
+    #expect(state.currentTabProjections().first { $0.tabID == tab }?.hasTerminalActivity == true)
+
+    // One pane finishes; the sibling pane keeps the tab busy.
+    leaves[0].bridge.state.progressState = nil
+    leaves[0].bridge.onProgressReport?(GHOSTTY_PROGRESS_STATE_REMOVE)
+    #expect(state.currentTabProjections().first { $0.tabID == tab }?.hasTerminalActivity == true)
+
+    // The last pane finishes: the tab goes idle.
+    leaves[1].bridge.state.progressState = nil
+    leaves[0].bridge.onProgressReport?(GHOSTTY_PROGRESS_STATE_REMOVE)
+    #expect(state.currentTabProjections().first { $0.tabID == tab }?.hasTerminalActivity == false)
+  }
+
+  @Test func rowSnapshotIsWorkingWhenAnySurfaceHasABusyAgent() {
+    var presence = AgentPresenceFeature.State()
+    let busySurface = UUID()
+    let idleSurface = UUID()
+    presence.records[
+      AgentPresenceFeature.PresenceKey(agent: .claude, surfaceID: busySurface)
+    ] = AgentPresenceFeature.PresenceRecord(activity: .busy, pids: [1])
+    presence.records[
+      AgentPresenceFeature.PresenceKey(agent: .codex, surfaceID: idleSurface)
+    ] = AgentPresenceFeature.PresenceRecord(activity: .awaitingInput, pids: [2])
+
+    #expect(!presence.rowSnapshot(across: [idleSurface], badgesEnabled: true).isWorking)
+    #expect(presence.rowSnapshot(across: [busySurface, idleSurface], badgesEnabled: true).isWorking)
   }
 
   // MARK: - Notification deduplication.
@@ -344,7 +460,296 @@ struct AgentBusyStateTests {
     }
   }
 
+  // MARK: - Notification retention limit.
+
+  @Test(.dependencies) func notificationsTrimToRetentionLimitKeepingNewest() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      withRetentionLimit(.oneHundred) {
+        let fixture = makeStateWithSurface()
+        // 101 appends against a cap of 100 evicts the single oldest.
+        for index in 0...100 {
+          fixture.state.appendHookNotification(title: "Done", body: "n-\(index)", surfaceID: fixture.surface.id)
+        }
+
+        #expect(fixture.state.notifications.count == 100)
+        // Newest is at index 0; `n-0` was trimmed.
+        #expect(fixture.state.notifications.first?.body == "n-100")
+        #expect(fixture.state.notifications.last?.body == "n-1")
+        #expect(!fixture.state.notifications.contains { $0.body == "n-0" })
+      }
+    }
+  }
+
+  @Test(.dependencies) func notificationsAtRetentionLimitAreNotTrimmed() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      withRetentionLimit(.oneHundred) {
+        let fixture = makeStateWithSurface()
+        for index in 0..<100 {
+          fixture.state.appendHookNotification(title: "Done", body: "n-\(index)", surfaceID: fixture.surface.id)
+        }
+
+        // Exactly at the limit evicts nothing, so the oldest survives.
+        #expect(fixture.state.notifications.count == 100)
+        #expect(fixture.state.notifications.last?.body == "n-0")
+      }
+    }
+  }
+
+  @Test(.dependencies) func unlimitedRetentionKeepsEveryNotification() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      withRetentionLimit(.unlimited) {
+        let fixture = makeStateWithSurface()
+        for index in 0..<250 {
+          fixture.state.appendHookNotification(title: "Done", body: "n-\(index)", surfaceID: fixture.surface.id)
+        }
+        #expect(fixture.state.notifications.count == 250)
+      }
+    }
+  }
+
+  @Test(.dependencies) func trimEvictsReadBeforeUnreadRegardlessOfAge() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      withRetentionLimit(.oneHundred) {
+        let fixture = makeStateWithSurface()
+        let surfaceID = fixture.surface.id
+        // Newest-first log: 40 unread on top, then 120 older read entries.
+        var list: [WorktreeTerminalNotification] = []
+        for index in 0..<40 {
+          list.append(
+            WorktreeTerminalNotification(
+              surfaceID: surfaceID, title: "t", body: "unread-\(index)",
+              createdAt: Date(timeIntervalSince1970: TimeInterval(2000 - index)), isRead: false
+            ))
+        }
+        for index in 0..<120 {
+          list.append(
+            WorktreeTerminalNotification(
+              surfaceID: surfaceID, title: "t", body: "read-\(index)",
+              createdAt: Date(timeIntervalSince1970: TimeInterval(1000 - index)), isRead: true
+            ))
+        }
+        fixture.state.setNotificationsForTesting(list)
+
+        fixture.state.enforceNotificationRetentionLimit()
+
+        #expect(fixture.state.notifications.count == 100)
+        // Every unread survives; read is dropped oldest-first down to the cap,
+        // even though the dropped read entries are newer than the kept unread.
+        #expect(fixture.state.notifications.filter { !$0.isRead }.count == 40)
+        #expect(fixture.state.notifications.contains { $0.body == "read-0" })
+        #expect(!fixture.state.notifications.contains { $0.body == "read-119" })
+      }
+    }
+  }
+
+  @Test(.dependencies) func trimEvictsOldestUnreadOnlyWhenUnreadAloneExceedsLimit() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      withRetentionLimit(.oneHundred) {
+        let fixture = makeStateWithSurface()
+        let surfaceID = fixture.surface.id
+        var list: [WorktreeTerminalNotification] = []
+        for index in 0..<120 {
+          list.append(
+            WorktreeTerminalNotification(
+              surfaceID: surfaceID, title: "t", body: "unread-\(index)",
+              createdAt: Date(timeIntervalSince1970: TimeInterval(2000 - index)), isRead: false
+            ))
+        }
+        fixture.state.setNotificationsForTesting(list)
+
+        fixture.state.enforceNotificationRetentionLimit()
+
+        #expect(fixture.state.notifications.count == 100)
+        // Newest 100 unread survive; the 20 oldest fall off.
+        #expect(fixture.state.notifications.contains { $0.body == "unread-0" })
+        #expect(!fixture.state.notifications.contains { $0.body == "unread-119" })
+        // The counter is decoupled from the log: it still reflects every arrival.
+        #expect(fixture.state.surfaceStates[surfaceID]?.unseenNotificationCount == 120)
+      }
+    }
+  }
+
+  @Test(.dependencies) func trimmingUnreadKeepsUnseenIndicatorAndSynthesizesRow() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      withRetentionLimit(.oneHundred) {
+        let fixture = makeStateWithSurface()
+        let tabB = fixture.state.createTab()!
+        let surfaceB = fixture.state.splitTree(for: tabB).root!.leftmostLeaf()
+
+        // The oldest entry is an unread notification on tab B.
+        fixture.state.appendHookNotification(title: "Done", body: "b", surfaceID: surfaceB.id)
+        #expect(fixture.state.surfaceStates[surfaceB.id]?.unseenNotificationCount == 1)
+        #expect(fixture.state.currentTabProjections().first { $0.tabID == tabB }?.unseenNotificationCount == 1)
+
+        // Fill the cap on tab A, evicting tab B's lone notification from the log.
+        for index in 0..<100 {
+          fixture.state.appendHookNotification(title: "Done", body: "a-\(index)", surfaceID: fixture.surface.id)
+        }
+
+        #expect(fixture.state.notifications.count == 100)
+        #expect(!fixture.state.notifications.contains { $0.surfaceID == surfaceB.id })
+        // Pruning the log must NOT clear the indicator; only reading / dismissing does.
+        #expect(fixture.state.surfaceStates[surfaceB.id]?.unseenNotificationCount == 1)
+        #expect(fixture.state.surfaceStates[surfaceB.id]?.hasUnseenNotification == true)
+        #expect(fixture.state.hasUnseenNotification(forTabID: tabB))
+        #expect(fixture.state.currentTabProjections().first { $0.tabID == tabB }?.unseenNotificationCount == 1)
+        // The projection carries the orphaned surface so the inspector can synthesize a row.
+        #expect(fixture.state.currentProjection().unseenSurfaces.contains { $0.id == surfaceB.id && $0.count == 1 })
+      }
+    }
+  }
+
+  @Test(.dependencies) func trimmingKeepsUnseenCountersForEveryEvictedSurface() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      withRetentionLimit(.oneHundred) {
+        let fixture = makeStateWithSurface()
+        let tabB = fixture.state.createTab()!
+        let surfaceB = fixture.state.splitTree(for: tabB).root!.leftmostLeaf()
+        let tabC = fixture.state.createTab()!
+        let surfaceC = fixture.state.splitTree(for: tabC).root!.leftmostLeaf()
+
+        // The two oldest entries are unread notifications on distinct surfaces.
+        fixture.state.appendHookNotification(title: "Done", body: "b", surfaceID: surfaceB.id)
+        fixture.state.appendHookNotification(title: "Done", body: "c", surfaceID: surfaceC.id)
+        #expect(fixture.state.surfaceStates[surfaceB.id]?.unseenNotificationCount == 1)
+        #expect(fixture.state.surfaceStates[surfaceC.id]?.unseenNotificationCount == 1)
+
+        // Fill the cap on tab A, evicting both older notifications in one trim.
+        for index in 0..<100 {
+          fixture.state.appendHookNotification(title: "Done", body: "a-\(index)", surfaceID: fixture.surface.id)
+        }
+
+        #expect(fixture.state.notifications.count == 100)
+        // Both evicted surfaces keep their outstanding unread; the cap only pruned the log.
+        #expect(fixture.state.surfaceStates[surfaceB.id]?.unseenNotificationCount == 1)
+        #expect(fixture.state.surfaceStates[surfaceC.id]?.unseenNotificationCount == 1)
+      }
+    }
+  }
+
+  @Test(.dependencies) func loweringRetentionLimitTrimsBacklogButKeepsUnseen() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      let fixture = makeStateWithSurface()
+      let tabB = fixture.state.createTab()!
+      let surfaceB = fixture.state.splitTree(for: tabB).root!.leftmostLeaf()
+
+      // Accumulate a backlog under the larger limit: an unread on tab B is oldest.
+      withRetentionLimit(.oneThousand) {
+        fixture.state.appendHookNotification(title: "Done", body: "b", surfaceID: surfaceB.id)
+        for index in 0..<150 {
+          fixture.state.appendHookNotification(title: "Done", body: "a-\(index)", surfaceID: fixture.surface.id)
+        }
+      }
+      #expect(fixture.state.notifications.count == 151)
+      #expect(fixture.state.surfaceStates[surfaceB.id]?.unseenNotificationCount == 1)
+
+      // Lowering the limit and enforcing it trims immediately, no new notification.
+      withRetentionLimit(.oneHundred) {
+        fixture.state.enforceNotificationRetentionLimit()
+      }
+
+      #expect(fixture.state.notifications.count == 100)
+      #expect(!fixture.state.notifications.contains { $0.surfaceID == surfaceB.id })
+      // Trimming the backlog never clears the indicator; only reading / dismissing does.
+      #expect(fixture.state.surfaceStates[surfaceB.id]?.unseenNotificationCount == 1)
+      #expect(fixture.state.currentTabProjections().first { $0.tabID == tabB }?.unseenNotificationCount == 1)
+    }
+  }
+
+  @Test(.dependencies) func focusingSurfaceClearsUnseenCounterAfterPruning() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      withRetentionLimit(.oneHundred) {
+        let fixture = makeStateWithSurface()
+        let tabB = fixture.state.createTab()!
+        let surfaceB = fixture.state.splitTree(for: tabB).root!.leftmostLeaf()
+
+        fixture.state.appendHookNotification(title: "Done", body: "b", surfaceID: surfaceB.id)
+        for index in 0..<100 {
+          fixture.state.appendHookNotification(title: "Done", body: "a-\(index)", surfaceID: fixture.surface.id)
+        }
+        #expect(fixture.state.surfaceStates[surfaceB.id]?.unseenNotificationCount == 1)
+
+        // Reading the surface (the user click on the synthesized row) resets it.
+        fixture.state.markNotificationsRead(forSurfaceID: surfaceB.id)
+        #expect(fixture.state.surfaceStates[surfaceB.id]?.unseenNotificationCount == 0)
+        #expect(!fixture.state.hasUnseenNotification(forTabID: tabB))
+      }
+    }
+  }
+
+  @Test(.dependencies) func closingSurfaceDropsItsUnseenCounterAndRefreshesIndicators() {
+    withDependencies {
+      $0.date = .constant(Date(timeIntervalSince1970: 1000))
+      $0.continuousClock = ImmediateClock()
+    } operation: {
+      withRetentionLimit(.oneHundred) {
+        let fixture = makeStateWithSurface(surfaceBindingActionPerformer: { _, _ in })
+        // Split so the tab keeps a sibling pane; the split focuses the sibling,
+        // leaving the original pane unfocused so its notification lands unread.
+        let sibling = UUID()
+        #expect(
+          fixture.state.performSplitAction(
+            .newSplit(direction: .right), for: fixture.surface.id, newSurfaceID: sibling))
+        fixture.state.appendHookNotification(title: "Done", body: "a", surfaceID: fixture.surface.id)
+        #expect(fixture.state.surfaceStates[fixture.surface.id]?.unseenNotificationCount == 1)
+        #expect(fixture.state.currentProjection().unseenSurfaces.contains { $0.id == fixture.surface.id })
+        #expect(fixture.state.hasUnseenNotification)
+
+        var indicatorEmits = 0
+        fixture.state.onNotificationIndicatorChanged = { indicatorEmits += 1 }
+
+        // Close only the pane holding the unread; the sibling keeps the tab alive,
+        // so teardown runs through cleanupSurfaceState, not the tab-close path.
+        #expect(fixture.state.closeSurface(id: fixture.surface.id))
+        fixture.surface.bridge.closeSurface(processAlive: false)
+
+        // No surface, no count: the counter is gone and the indicators refreshed.
+        #expect(fixture.state.surfaceStates[fixture.surface.id] == nil)
+        #expect(indicatorEmits >= 1)
+        #expect(fixture.state.currentProjection().unseenSurfaces.isEmpty)
+        #expect(!fixture.state.hasUnseenNotification)
+        // The lingering log entry is marked read so no orphan unread row survives.
+        #expect(fixture.state.notifications.allSatisfy { $0.isRead })
+      }
+    }
+  }
+
   // MARK: - Helpers.
+
+  private func withRetentionLimit(_ limit: NotificationRetentionLimit, _ operation: () -> Void) {
+    @Shared(.settingsFile) var settingsFile
+    let original = settingsFile.global.notificationRetentionLimit
+    $settingsFile.withLock { $0.global.notificationRetentionLimit = limit }
+    defer { $settingsFile.withLock { $0.global.notificationRetentionLimit = original } }
+    operation()
+  }
 
   private func withViewedSurfaceDependencies(_ operation: () -> Void) {
     withDependencies {
@@ -430,8 +835,13 @@ struct AgentBusyStateTests {
     Self.makeHookEvent(name, agent: agent, surfaceID: surfaceID, pid: pid)
   }
 
-  private func makeStateWithSurface(worktree: Worktree? = nil) -> SurfaceFixture {
-    let (manager, presence) = WorktreeTerminalManager.withPresenceHarness()
+  private func makeStateWithSurface(
+    worktree: Worktree? = nil,
+    surfaceBindingActionPerformer: ((GhosttySurfaceView, String) -> Void)? = nil
+  ) -> SurfaceFixture {
+    let (manager, presence) = WorktreeTerminalManager.withPresenceHarness(
+      surfaceBindingActionPerformer: surfaceBindingActionPerformer
+    )
     let resolvedWorktree = worktree ?? makeWorktree()
 
     let state = manager.state(for: resolvedWorktree) { false }

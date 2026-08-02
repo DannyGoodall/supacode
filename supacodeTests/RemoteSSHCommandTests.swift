@@ -4,6 +4,69 @@ import Testing
 @testable import SupacodeSettingsShared
 @testable import supacode
 
+struct WellKnownToolDirectoriesTests {
+  @Test func absoluteListCoversMacAndLinuxToolPrefixes() {
+    let dirs = WellKnownToolDirectories.absolute
+    #expect(dirs.contains("/opt/homebrew/bin"))  // macOS Apple Silicon.
+    #expect(dirs.contains("/usr/local/bin"))  // macOS Intel / common.
+    #expect(dirs.contains("/opt/local/bin"))  // macOS MacPorts.
+    #expect(dirs.contains("/home/linuxbrew/.linuxbrew/bin"))  // Linux shared (#671).
+  }
+
+  @Test func pathExportPrefixAppendsFixedDirsAfterExistingPath() {
+    // Appending (via `${PATH:+$PATH:}`) keeps an rc-resolvable tool's own
+    // precedence: the user's PATH comes first, the fixed dirs are a fallback.
+    let prefix = WellKnownToolDirectories.pathExportPrefix
+    #expect(prefix.hasPrefix("export PATH=\"${PATH:+$PATH:}\""))
+    #expect(prefix.hasSuffix("; "))
+    let existingPathIndex = prefix.range(of: "${PATH:+$PATH:}")?.lowerBound
+    let brewIndex = prefix.range(of: "/home/linuxbrew/.linuxbrew/bin")?.lowerBound
+    #expect(existingPathIndex != nil && brewIndex != nil && existingPathIndex! < brewIndex!)
+  }
+
+  @Test func pathExportPrefixGuardsEmptyPathAndUnsetHome() throws {
+    // Exercise the guards, not just the idioms: run the export under an empty
+    // PATH and unset HOME, then read PATH back. A leading colon would silently
+    // put the CWD on PATH, and a bare `/.linuxbrew/bin` would resolve from root.
+    let prefix = WellKnownToolDirectories.pathExportPrefix
+    let resolved = try Self.runSh(
+      "unset HOME; PATH=''; " + prefix + #"printf '%s' "$PATH""#)
+    #expect(!resolved.hasPrefix(":"))
+    #expect(!resolved.contains(":/.linuxbrew/bin"))
+    #expect(!resolved.contains("$HOME"))  // no per-user dirs survive an unset HOME.
+    #expect(resolved.hasPrefix("/opt/homebrew/bin"))
+  }
+
+  @Test func pathExportPrefixIsValidPosixSh() throws {
+    // `sh -n` catches an unbalanced quote a golden-string rewrite could smuggle
+    // in. The prefix must parse both standalone and spliced ahead of a command.
+    for script in [
+      WellKnownToolDirectories.pathExportPrefix + "true",
+      WellKnownToolDirectories.pathExportPrefix + "command -v zmx >/dev/null 2>&1",
+    ] {
+      let check = Process()
+      check.executableURL = URL(fileURLWithPath: "/bin/sh")
+      check.arguments = ["-n", "-c", script]
+      try check.run()
+      check.waitUntilExit()
+      #expect(check.terminationStatus == 0, "not valid sh: \(script)")
+    }
+  }
+
+  /// Runs `script` under `/bin/sh -c` and returns its stdout.
+  private static func runSh(_ script: String) throws -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = ["-c", script]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    try process.run()
+    process.waitUntilExit()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    return String(bytes: data, encoding: .utf8) ?? ""
+  }
+}
+
 struct RemoteHostTests {
   @Test func bareAliasHasNoUserOrPortOptions() {
     let host = RemoteHost(alias: "devbox")
@@ -248,7 +311,9 @@ struct ZmxAttachRemoteTests {
     // shell) behind the banners, and a failed attach falls through to a
     // fresh default shell with a visible notice instead of an instant close.
     let script = ZmxAttach.remoteConnectScript(makeLaunch())
-    #expect(script.hasPrefix(surfaceExport + "if command -v zmx >/dev/null 2>&1; then "))
+    #expect(
+      script.hasPrefix(
+        surfaceExport + ZmxAttach.brewPathPrefix + "if command -v zmx >/dev/null 2>&1; then "))
     #expect(
       script.contains(
         "zmx attach \(hostSessionID) \"$SHELL\" -l -c "
@@ -306,12 +371,32 @@ struct ZmxAttachRemoteTests {
     )
   }
 
+  @Test func connectScriptPrependsBrewPathAheadOfZmxLookup() {
+    // Regression for issue #671: a non-interactive login shell never sources
+    // the interactive rc file where Homebrew's Linux installer puts
+    // `brew shellenv`, so brew-installed zmx is off PATH. The connect script
+    // must augment PATH with the brew prefixes before `command -v zmx`, and
+    // the surface-id export must still precede it so the session inherits it.
+    let script = ZmxAttach.remoteConnectScript(makeLaunch())
+    #expect(script.contains(ZmxAttach.brewPathPrefix + "if command -v zmx"))
+    let pathIndex = script.range(of: "export PATH=")?.lowerBound
+    let lookupIndex = script.range(of: "command -v zmx")?.lowerBound
+    #expect(pathIndex != nil && lookupIndex != nil && pathIndex! < lookupIndex!)
+    #expect(script.contains("/home/linuxbrew/.linuxbrew/bin"))
+    #expect(script.contains("$HOME/.linuxbrew/bin"))
+    #expect(script.contains("/opt/homebrew/bin"))
+  }
+
   @Test func reconnectScriptReattachesExistingSessionAndNeverRerunsUserCommand() {
     // Reconnects are attach-only: a session that ended while disconnected
     // closes the pane (exit 0, with a notice) instead of re-running a
     // one-shot command. The suffix-anchored grep matches names prefixed by a
     // host-side ZMX_SESSION_PREFIX.
     let script = ZmxAttach.remoteReconnectScript(makeLaunch(userCommand: "./deploy.sh"))
+    // The brew PATH augmentation precedes the zmx lookup here too (issue #671).
+    #expect(
+      script.hasPrefix(
+        surfaceExport + ZmxAttach.brewPathPrefix + "if command -v zmx >/dev/null 2>&1; then "))
     #expect(script.contains("if zmx list --short 2>/dev/null | grep -q '\(hostSessionID)$'; then "))
     #expect(script.contains("exec zmx attach \(hostSessionID)\n"))
     #expect(script.contains(ZmxAttach.sessionEndedNotice + "exit 0\n"))
@@ -342,7 +427,7 @@ struct ZmxAttachRemoteTests {
     #expect(ZmxAttach.loginShellRun("echo 'hi'") == "exec \"$SHELL\" -l -c 'echo '\\''hi'\\'''")
   }
 
-  @Test func bannerConstantsAreSelfTerminatedPrintfStatements() throws {
+  @Test func bannerConstantsAreSelfTerminatedPrintfStatements() async throws {
     // Every banner must be a complete `printf '...'; ` statement: script
     // builders concatenate them blindly, and a missing trailing separator
     // would merge the banner into the next command by word concatenation,
@@ -366,8 +451,7 @@ struct ZmxAttachRemoteTests {
     run.arguments = ["-c", ZmxAttach.betaBanner + ZmxAttach.persistentBanner + "exit 42"]
     run.standardOutput = FileHandle.nullDevice
     run.standardError = FileHandle.nullDevice
-    try run.run()
-    run.waitUntilExit()
+    try await run.runToExit()
     #expect(run.terminationStatus == 42)
   }
 
@@ -392,7 +476,7 @@ struct ZmxAttachRemoteTests {
     #expect(script.ranges(of: reconnect).count == 1)
   }
 
-  @Test func reconnectLoopScriptsAreValidShAndPassExitCodesThrough() throws {
+  @Test func reconnectLoopScriptsAreValidShAndPassExitCodesThrough() async throws {
     // `sh -n` catches an unbalanced quote or broken test that a golden-string
     // rewrite could smuggle in; the run asserts non-255 passthrough without
     // ever reaching `sleep`.
@@ -410,8 +494,7 @@ struct ZmxAttachRemoteTests {
       let check = Process()
       check.executableURL = URL(fileURLWithPath: "/bin/sh")
       check.arguments = ["-n", "-c", script]
-      try check.run()
-      check.waitUntilExit()
+      try await check.runToExit()
       #expect(check.terminationStatus == 0, "sh -n rejected: \(script)")
     }
     let run = Process()
@@ -419,8 +502,7 @@ struct ZmxAttachRemoteTests {
     run.arguments = ["-c", loop]
     run.standardOutput = FileHandle.nullDevice
     run.standardError = FileHandle.nullDevice
-    try run.run()
-    run.waitUntilExit()
+    try await run.runToExit()
     #expect(run.terminationStatus == 7)
   }
 
@@ -456,21 +538,62 @@ struct ZmxAttachRemoteTests {
   @Test func buildRemoteCommandFallsBackToBareReconnectLoopWhenLocalZmxUnavailable() {
     let launch = makeLaunch(hostPersistenceEnabled: false)
     let command = ZmxAttach.buildRemoteCommand(launch, localZmxExecutablePath: nil)
-    // No local zmx: still a reconnect loop, just without quit persistence.
-    #expect(
-      command
-        == SSHReconnectLoop.script(
-          connect: SSHCommand.commandLine(
-            host: launch.host,
-            remoteCommand: ZmxAttach.posixShellWrapped(ZmxAttach.remoteConnectScript(launch))
-          ),
-          reconnect: SSHCommand.commandLine(
-            host: launch.host,
-            remoteCommand: ZmxAttach.posixShellWrapped(ZmxAttach.remoteReconnectScript(launch))
-          )
-        )
+    let loop = SSHReconnectLoop.script(
+      connect: SSHCommand.commandLine(
+        host: launch.host,
+        remoteCommand: ZmxAttach.posixShellWrapped(ZmxAttach.remoteConnectScript(launch))
+      ),
+      reconnect: SSHCommand.commandLine(
+        host: launch.host,
+        remoteCommand: ZmxAttach.posixShellWrapped(ZmxAttach.remoteReconnectScript(launch))
+      )
     )
+    // No local zmx: still a reconnect loop, just without quit persistence, but
+    // wrapped in `/bin/sh -c` so Ghostty's `exec -l <command>` leads with an
+    // executable and not the loop's opening `trap` builtin (#737).
+    #expect(command == "/bin/sh -c " + ZmxAttach.shellQuote(loop))
+    #expect(command.hasPrefix("/bin/sh -c "))
     #expect(!command.contains("zmx attach"))
+  }
+
+  @Test func bareReconnectLoopSurvivesGhosttyExecLoginWrapping() async throws {
+    // Ghostty runs a surface command as `bash -c "exec -l <command>"`, so it
+    // must lead with an executable. `sh -n` confirms the fallback's outer
+    // wrapper is balanced (it can't descend into the single-quoted inner loop;
+    // that template is parse-checked in
+    // `reconnectLoopScriptsAreValidShAndPassExitCodesThrough`). The benign runs
+    // below then prove the `/bin/sh -c` prefix lets `exec -l` resolve an
+    // executable, while the unwrapped loop still dies with `trap: not found`
+    // (#737).
+    let launch = makeLaunch(hostPersistenceEnabled: false)
+    let command = ZmxAttach.buildRemoteCommand(launch, localZmxExecutablePath: nil)
+    let parse = Process()
+    parse.executableURL = URL(fileURLWithPath: "/bin/sh")
+    parse.arguments = ["-n", "-c", command]
+    try await parse.runToExit()
+    #expect(parse.terminationStatus == 0, "sh -n rejected: \(command)")
+
+    // A stand-in loop with connect lines that exit 0 (non-255, so the retry
+    // body never runs) exercises the exact `bash -c "exec -l <command>"` shape
+    // Ghostty applies, isolated from real ssh dialing.
+    let benignLoop = SSHReconnectLoop.script(connect: "sh -c 'exit 0'", reconnect: "sh -c 'exit 0'")
+
+    let wrapped = Process()
+    wrapped.executableURL = URL(fileURLWithPath: "/bin/bash")
+    wrapped.arguments = ["--noprofile", "--norc", "-c", "exec -l /bin/sh -c \(ZmxAttach.shellQuote(benignLoop))"]
+    wrapped.standardOutput = FileHandle.nullDevice
+    wrapped.standardError = FileHandle.nullDevice
+    try await wrapped.runToExit()
+    #expect(wrapped.terminationStatus == 0, "wrapped loop failed under exec -l")
+
+    // Control: the unwrapped loop is exactly what broke #737.
+    let bare = Process()
+    bare.executableURL = URL(fileURLWithPath: "/bin/bash")
+    bare.arguments = ["--noprofile", "--norc", "-c", "exec -l \(benignLoop)"]
+    bare.standardOutput = FileHandle.nullDevice
+    bare.standardError = FileHandle.nullDevice
+    try await bare.runToExit()
+    #expect(bare.terminationStatus == 127, "bare loop unexpectedly survived exec -l")
   }
 
   @Test func buildRemoteCommandForwardsUsernameAndPort() {
@@ -481,11 +604,19 @@ struct ZmxAttachRemoteTests {
     #expect(command.contains("-p 2222 alice@box "))
   }
 
-  @Test func remoteKillInvocationGuardsMissingZmxAndRidesProbeOptions() {
+  @Test func remoteKillInvocationGuardsMissingZmxAndRidesProbeOptions() throws {
     let result = ZmxAttach.remoteKillInvocation(
       host: RemoteHost(alias: "box", username: "alice", port: 2222),
       sessionID: "supa-x"
     )
+    // The `-c` script augments PATH with the brew dirs (#671) before the zmx
+    // guard. Compose the expected argument through the same quoting helpers
+    // rather than hand-escaping: `pathExportPrefix` embeds single quotes, so a
+    // literal golden would be fragile without adding review value.
+    let killScript =
+      ZmxAttach.brewPathPrefix
+      + "command -v zmx >/dev/null 2>&1 || exit 0; zmx kill supa-x; "
+      + "! zmx list --short 2>/dev/null | grep -q 'supa-x$'"
     #expect(result.executableURL == URL(fileURLWithPath: "/usr/bin/ssh"))
     #expect(
       result.arguments == [
@@ -499,10 +630,19 @@ struct ZmxAttachRemoteTests {
         "-p", "2222",
         "alice@box",
         SSHCommand.loginShellWrapped(
-          "'/bin/sh' '-c' 'command -v zmx >/dev/null 2>&1 || exit 0; zmx kill supa-x; "
-            + "! zmx list --short 2>/dev/null | grep -q '\\''supa-x$'\\'''"
+          SSHCommand.remoteCommand(
+            executable: "/bin/sh", arguments: ["-c", killScript], workingDirectory: nil)
         ),
       ]
     )
+    // Guard the intent directly: brew PATH precedes the zmx guard, and the
+    // spliced `-c` script parses as POSIX sh (symmetry with connect/reconnect).
+    #expect(killScript.hasPrefix("export PATH="))
+    let check = Process()
+    check.executableURL = URL(fileURLWithPath: "/bin/sh")
+    check.arguments = ["-n", "-c", killScript]
+    try check.run()
+    check.waitUntilExit()
+    #expect(check.terminationStatus == 0, "kill script not valid sh: \(killScript)")
   }
 }

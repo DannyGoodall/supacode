@@ -11,7 +11,6 @@ import Testing
 @testable import supacode
 
 @MainActor
-@Suite(.serialized)
 struct AppFeatureDeeplinkTests {
   // MARK: - Routing after load.
 
@@ -72,11 +71,66 @@ struct AppFeatureDeeplinkTests {
 
   @Test(.dependencies) func runWorktreeDeeplink() async {
     let worktree = makeWorktree()
-    let store = makeStore(worktree: worktree)
+    let definition = seedRunScript(for: worktree, command: "npm start")
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    var settings = SettingsFeature.State()
+    settings.automatedActionPolicy = .always
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: settings,
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+    store.exhaustivity = .off
 
     await store.send(.deeplink(.worktree(id: worktree.id, action: .run)))
     await store.receive(\.repositories.selectWorktree)
-    await store.receive(\.runScript)
+    await store.finish()
+    let ranTarget = sent.value.contains {
+      if case .runBlockingScript(let target, _, let script, _) = $0 {
+        return target.id == worktree.id && script == definition.command
+      }
+      return false
+    }
+    #expect(ranTarget)
+  }
+
+  /// Bare `run` used to resolve its script from the selected worktree, so a
+  /// cross-worktree call ran the wrong repository's script.
+  @Test(.dependencies) func runWorktreeDeeplinkResolvesScriptFromTargetNotSelection() async {
+    let worktree = makeWorktree()
+    let target = makeWorktree(id: "/tmp/repo/wt-2", name: "wt-2")
+    let definition = seedRunScript(for: target, command: "npm start")
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    var settings = SettingsFeature.State()
+    settings.automatedActionPolicy = .always
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktrees: [worktree, target], selected: worktree),
+        settings: settings,
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+    store.exhaustivity = .off
+
+    // Backgrounded, so nothing selects the target first.
+    await store.send(.deeplink(.worktree(id: target.id, action: .run, background: true)))
+    await store.finish()
+    #expect(store.state.repositories.selection == .worktree(worktree.id))
+    let ranTarget = sent.value.contains {
+      if case .runBlockingScript(let ran, _, let script, _) = $0 {
+        return ran.id == target.id && script == definition.command
+      }
+      return false
+    }
+    #expect(ranTarget)
   }
 
   @Test(.dependencies) func pinWorktreeDeeplink() async {
@@ -105,6 +159,96 @@ struct AppFeatureDeeplinkTests {
     await store.receive(\.repositories.pushWorktreeBookmark)
   }
 
+  @Test(.dependencies) func pinWorktreeDeeplinkFlipsPendingPinWhileCreating() async {
+    // A pin deeplink targeting a still-creating row parks the transient intent
+    // instead of alerting "Worktree not found".
+    let worktree = makeWorktree()
+    var repositories = makeRepositoriesState(worktree: worktree)
+    let pendingID = Worktree.ID("pending:new")
+    repositories.pendingWorktrees = [
+      PendingWorktree(
+        id: pendingID,
+        repositoryID: "/tmp/repo",
+        progress: WorktreeCreationProgress(stage: .creatingWorktree, worktreeName: "swift-otter")
+      )
+    ]
+    repositories.reconcileSidebarForTesting()
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: repositories,
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: pendingID, action: .pin)))
+    await store.receive(\.repositories.pinWorktree)
+    await store.finish()
+
+    #expect(store.state.repositories.pendingWorktrees.first?.pinned == true)
+    #expect(store.state.alert == nil)
+  }
+
+  @Test(.dependencies) func unpinWorktreeDeeplinkFlipsPendingPinWhileCreating() async {
+    // Mirror of the pin case: the not-found guard admits the unpin arm too.
+    let worktree = makeWorktree()
+    var repositories = makeRepositoriesState(worktree: worktree)
+    let pendingID = Worktree.ID("pending:new")
+    repositories.pendingWorktrees = [
+      PendingWorktree(
+        id: pendingID,
+        repositoryID: "/tmp/repo",
+        progress: WorktreeCreationProgress(stage: .creatingWorktree, worktreeName: "swift-otter"),
+        pinned: true
+      )
+    ]
+    repositories.reconcileSidebarForTesting()
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: repositories,
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: pendingID, action: .unpin)))
+    await store.receive(\.repositories.unpinWorktree)
+    await store.finish()
+
+    #expect(store.state.repositories.pendingWorktrees.first?.pinned == false)
+    #expect(store.state.alert == nil)
+  }
+
+  @Test(.dependencies) func selectWorktreeDeeplinkRetargetsMaterializedPendingID() async {
+    // The shared deeplink id resolver consults the pending → real map, so a
+    // stale pending id clears the not-found guard for non-pin actions too.
+    let worktree = makeWorktree()
+    var repositories = makeRepositoriesState(worktree: worktree)
+    repositories.selection = nil
+    let pendingID = Worktree.ID("pending:materialized")
+    repositories.resolvedPendingWorktrees = [pendingID: .init(worktreeID: worktree.id, repositoryID: "/tmp/repo")]
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: repositories,
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: pendingID, action: .select)))
+    await store.receive(\.repositories.selectWorktree)
+    await store.finish()
+
+    #expect(store.state.repositories.selectedWorktreeID == worktree.id)
+    #expect(store.state.alert == nil)
+  }
+
   @Test(.dependencies) func unpinWorktreeDeeplink() async {
     let worktree = makeWorktree()
     var repositories = makeRepositoriesState(worktree: worktree)
@@ -129,12 +273,445 @@ struct AppFeatureDeeplinkTests {
     await store.receive(\.repositories.unpinWorktree)
   }
 
-  @Test(.dependencies) func archiveWorktreeDeeplink() async {
+  @Test(.dependencies) func appearanceWorktreeDeeplinkSetsTitleAndColor() async {
+    let worktree = makeWorktree()
+    let (store, repositoryID) = makeStoreWithSidebarItem(worktree: worktree, item: .init())
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .appearance(title: "Custom", color: "red"))))
+    await store.receive(\.repositories.setWorktreeAppearance)
+
+    let item = store.state.repositories.sidebar
+      .sections[repositoryID]?.buckets[.pinned]?.items[worktree.id]
+    #expect(item?.title == "Custom")
+    #expect(item?.color == .red)
+  }
+
+  @Test(.dependencies) func appearanceWorktreeDeeplinkColorOnlyPreservesTitleOverride() async {
+    let worktree = makeWorktree()
+    let (store, repositoryID) = makeStoreWithSidebarItem(
+      worktree: worktree,
+      item: .init(title: "Custom")
+    )
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .appearance(title: nil, color: "#A1B2C3"))))
+    await store.receive(\.repositories.setWorktreeAppearance)
+
+    let item = store.state.repositories.sidebar
+      .sections[repositoryID]?.buckets[.pinned]?.items[worktree.id]
+    #expect(item?.title == "Custom")
+    #expect(item?.color == .custom("#A1B2C3"))
+  }
+
+  @Test(.dependencies) func appearanceWorktreeDeeplinkTitleOnlyPreservesColor() async {
+    let worktree = makeWorktree()
+    let (store, repositoryID) = makeStoreWithSidebarItem(
+      worktree: worktree,
+      item: .init(title: "Old", color: .blue)
+    )
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .appearance(title: "New", color: nil))))
+    await store.receive(\.repositories.setWorktreeAppearance)
+
+    let item = store.state.repositories.sidebar
+      .sections[repositoryID]?.buckets[.pinned]?.items[worktree.id]
+    #expect(item?.title == "New")
+    #expect(item?.color == .blue)
+  }
+
+  @Test(.dependencies) func appearanceWorktreeDeeplinkClearsTitleAndColor() async {
+    let worktree = makeWorktree()
+    let (store, repositoryID) = makeStoreWithSidebarItem(
+      worktree: worktree,
+      item: .init(title: "Custom", color: .blue)
+    )
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .appearance(title: "", color: "none"))))
+    await store.receive(\.repositories.setWorktreeAppearance)
+
+    let item = store.state.repositories.sidebar
+      .sections[repositoryID]?.buckets[.pinned]?.items[worktree.id]
+    #expect(item?.title == nil)
+    #expect(item?.color == nil)
+  }
+
+  @Test(.dependencies) func appearanceWorktreeDeeplinkWithInvalidColorShowsAlert() async {
+    let worktree = makeWorktree()
+    let (store, repositoryID) = makeStoreWithSidebarItem(
+      worktree: worktree,
+      item: .init(title: "Custom", color: .blue)
+    )
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .appearance(title: nil, color: "mauve"))))
+    await store.finish()
+
+    // The alert doubles as the socket-ack failure signal, so a CLI caller
+    // gets ok=false instead of a silent success. Appearance never selects the
+    // worktree, so no `selectWorktree` is received.
+    #expect(store.state.alert != nil)
+    let item = store.state.repositories.sidebar
+      .sections[repositoryID]?.buckets[.pinned]?.items[worktree.id]
+    #expect(item?.color == .blue)
+    #expect(item?.title == "Custom")
+  }
+
+  @Test(.dependencies) func appearanceWorktreeDeeplinkWithInvalidColorStillAppliesTitle() async {
+    let worktree = makeWorktree()
+    let (store, repositoryID) = makeStoreWithSidebarItem(
+      worktree: worktree,
+      item: .init(title: "Custom", color: .blue)
+    )
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .appearance(title: "New", color: ""))))
+    await store.receive(\.repositories.setWorktreeAppearance)
+    await store.finish()
+
+    // An invalid color no longer rejects a valid title: the title applies, the
+    // tint is left unchanged, and the alert still signals ok=false.
+    #expect(store.state.alert != nil)
+    let item = store.state.repositories.sidebar
+      .sections[repositoryID]?.buckets[.pinned]?.items[worktree.id]
+    #expect(item?.color == .blue)
+    #expect(item?.title == "New")
+  }
+
+  @Test(.dependencies) func appearanceWorktreeDeeplinkWhitespaceOnlyTitleClearsOverride() async {
+    let worktree = makeWorktree()
+    let (store, repositoryID) = makeStoreWithSidebarItem(
+      worktree: worktree,
+      item: .init(title: "Custom", color: .blue)
+    )
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .appearance(title: "   ", color: nil))))
+    await store.receive(\.repositories.setWorktreeAppearance)
+
+    let item = store.state.repositories.sidebar
+      .sections[repositoryID]?.buckets[.pinned]?.items[worktree.id]
+    #expect(item?.title == nil)
+    #expect(item?.color == .blue)
+  }
+
+  @Test(.dependencies) func appearanceWorktreeDeeplinkCollapsesControlCharactersInTitle() async {
+    let worktree = makeWorktree()
+    let (store, repositoryID) = makeStoreWithSidebarItem(worktree: worktree, item: .init())
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .appearance(title: "a\tb\nc", color: nil))))
+    await store.receive(\.repositories.setWorktreeAppearance)
+
+    let item = store.state.repositories.sidebar
+      .sections[repositoryID]?.buckets[.pinned]?.items[worktree.id]
+    #expect(item?.title == "a b c")
+  }
+
+  // MARK: - Background opt-out.
+
+  /// The gate is shared by every selecting action, so one action pins it in both
+  /// directions rather than repeating the assertion per command.
+  @Test(.dependencies) func backgroundDeeplinkSkipsWorktreeSelection() async {
+    let worktree = makeWorktree()
+    let other = makeWorktree(id: "/tmp/repo/wt-2", name: "wt-2")
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktrees: [worktree, other], selected: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: other.id, action: .pin, background: true)))
+    await store.receive(\.repositories.pinWorktree)
+    await store.finish()
+    #expect(store.state.repositories.selection == .worktree(worktree.id))
+  }
+
+  @Test(.dependencies) func foregroundDeeplinkStillSelectsWorktree() async {
     let worktree = makeWorktree()
     let store = makeStore(worktree: worktree)
 
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .pin)))
+    await store.receive(\.repositories.selectWorktree)
+  }
+
+  /// The script tab is created by a terminal command, not by the deeplink gate,
+  /// so the intent has to survive all the way into `runBlockingScript`.
+  @Test(.dependencies) func backgroundRunLaunchesTheScriptTabUnfocused() async {
+    let worktree = makeWorktree()
+    let definition = seedRunScript(for: worktree, command: "npm start")
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .run, background: true)))
+    await store.finish()
+    let launchedUnfocused = sent.value.contains {
+      if case .runBlockingScript(_, _, let script, let focusing) = $0 {
+        return script == definition.command && focusing == false
+      }
+      return false
+    }
+    #expect(launchedUnfocused)
+  }
+
+  @Test(.dependencies) func backgroundStopLeavesFocusAlone() async {
+    let worktree = makeWorktree()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .stop, background: true)))
+    await store.finish()
+    let stoppedUnfocused = sent.value.contains {
+      if case .stopRunScript(_, let focusing) = $0 { return focusing == false }
+      return false
+    }
+    #expect(stoppedUnfocused)
+  }
+
+  @Test(.dependencies) func backgroundStopScriptLeavesFocusAlone() async {
+    let worktree = makeWorktree()
+    let definition = seedRunScript(for: worktree, command: "npm start")
+    var repositories = makeRepositoriesState(worktree: worktree)
+    repositories.reconcileSidebarForTesting()
+    repositories.sidebarItems[id: worktree.id]?.runningScripts[id: definition.id] =
+      .init(id: definition.id, tint: definition.resolvedTintColor)
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(repositories: repositories, settings: SettingsFeature.State())
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .worktree(id: worktree.id, action: .stopScript(scriptID: definition.id), background: true)
+      )
+    )
+    await store.finish()
+    let stoppedUnfocused = sent.value.contains {
+      if case .stopScript(_, let definitionID, let focusing) = $0 {
+        return definitionID == definition.id && focusing == false
+      }
+      return false
+    }
+    #expect(stoppedUnfocused)
+  }
+
+  /// Archive and delete reach their lifecycle script through the repositories
+  /// delegate, which is the one relay that does not see the deeplink.
+  @Test(.dependencies) func backgroundArchiveRunsItsScriptUnfocused() async {
+    let worktree = makeWorktree()
+    @Shared(.repositorySettings(worktree.repositoryRootURL, host: worktree.host)) var settings
+    $settings.withLock { $0.archiveScript = "echo archiving" }
+    defer { $settings.withLock { $0.archiveScript = "" } }
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    var appSettings = SettingsFeature.State()
+    appSettings.automatedActionPolicy = .always
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: appSettings,
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+      $0.date = .constant(Date(timeIntervalSince1970: 1_000_000))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .archive, background: true)))
+    await store.finish()
+    let archivedUnfocused = sent.value.contains {
+      if case .runBlockingScript(_, .archive, _, let focusing) = $0 { return focusing == false }
+      return false
+    }
+    #expect(archivedUnfocused)
+  }
+
+  /// Archive prompts before it runs, and the confirm path replays the action
+  /// without the deeplink, so the intent has to be on the dialog state.
+  @Test(.dependencies) func backgroundArchiveSurvivesItsConfirmation() async {
+    let worktree = makeWorktree()
+    let store = makeStore(worktree: worktree)
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .archive, background: true)))
+    #expect(store.state.deeplinkInputConfirmation?.background == true)
+  }
+
+  /// Bare `run` never prompted before this routing change, so it must not start.
+  @Test(.dependencies) func bareRunDoesNotPromptUnderTheDefaultPolicy() async {
+    let worktree = makeWorktree()
+    seedRunScript(for: worktree, command: "npm start")
+    let store = makeStore(worktree: worktree)
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .run)))
+    await store.finish()
+    #expect(store.state.deeplinkInputConfirmation == nil)
+  }
+
+  @Test(.dependencies) func backgroundTabCloseLeavesFocusAlone() async {
+    let worktree = makeWorktree()
+    let tabID = UUID()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    // Closing a tab confirms by default; bypass so the command actually dispatches.
+    var settings = SettingsFeature.State()
+    settings.automatedActionPolicy = .always
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: settings,
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+      $0.terminalClient.tabExists = { _, _ in true }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(.worktree(id: worktree.id, action: .tabDestroy(tabID: tabID), background: true))
+    )
+    await store.finish()
+    let closedUnfocused = sent.value.contains {
+      if case .destroyTab(_, _, let focusing) = $0 { return focusing == false }
+      return false
+    }
+    #expect(closedUnfocused)
+  }
+
+  /// The confirm path re-enters `worktreeActionEffect` without the original
+  /// deeplink, so the opt-out has to survive on the dialog state or a confirmed
+  /// command would focus while an auto-approved one would not.
+  @Test(.dependencies) func backgroundSurvivesInputConfirmation() async {
+    let worktree = makeWorktree()
+    let store = makeStore(worktree: worktree)
+
+    await store.send(
+      .deeplink(
+        .worktree(id: worktree.id, action: .tabNew(input: "npm test", id: nil, title: nil), background: true)
+      )
+    )
+    #expect(store.state.deeplinkInputConfirmation?.background == true)
+  }
+
+  @Test(.dependencies) func foregroundConfirmationCarriesFocusingIntent() async {
+    let worktree = makeWorktree()
+    let store = makeStore(worktree: worktree)
+
+    await store.send(
+      .deeplink(.worktree(id: worktree.id, action: .tabNew(input: "npm test", id: nil, title: nil)))
+    )
+    #expect(store.state.deeplinkInputConfirmation?.background == false)
+  }
+
+  @Test(.dependencies) func archiveWorktreeDeeplinkShowsConfirmation() async {
+    let worktree = makeWorktree()
+    let store = makeStore(worktree: worktree)
+
+    // Default policy `.cliOnly` does not bypass a URL-scheme deeplink, so it prompts.
     await store.send(.deeplink(.worktree(id: worktree.id, action: .archive)))
-    await store.receive(\.repositories.requestArchiveWorktree)
+    #expect(store.state.deeplinkInputConfirmation?.message == .confirmation("Archive worktree \"wt-1\"?"))
+    #expect(store.state.deeplinkInputConfirmation?.action == .archive)
+  }
+
+  @Test(.dependencies) func archiveWorktreeDeeplinkSkipsConfirmationWhenPolicyAllows() async {
+    let worktree = makeWorktree()
+    clearArchiveScript(for: worktree)
+    var settings = SettingsFeature.State()
+    settings.automatedActionPolicy = .always
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: settings,
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.date = .constant(Date(timeIntervalSince1970: 1_000_000))
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .archive)))
+    #expect(store.state.deeplinkInputConfirmation == nil)
+    await store.receive(\.repositories.archiveWorktreeConfirmed)
+  }
+
+  @Test(.dependencies) func archiveWorktreeSocketDeeplinkSkipsConfirmationUnderCLIOnly() async {
+    let worktree = makeWorktree()
+    clearArchiveScript(for: worktree)
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.date = .constant(Date(timeIntervalSince1970: 1_000_000))
+    }
+    store.exhaustivity = .off
+
+    // `.cliOnly` (the default) bypasses for a socket command.
+    await store.send(
+      .deeplink(.worktree(id: worktree.id, action: .archive), source: .socket))
+    #expect(store.state.deeplinkInputConfirmation == nil)
+    await store.receive(\.repositories.archiveWorktreeConfirmed)
+  }
+
+  @Test(.dependencies) func archiveWorktreeMergedDeeplinkSkipsConfirmation() async {
+    let worktree = makeWorktree()
+    clearArchiveScript(for: worktree)
+    var settings = SettingsFeature.State()
+    settings.automatedActionPolicy = .never
+    var repositories = makeRepositoriesState(worktree: worktree)
+    repositories.reconcileSidebarForTesting()
+    repositories.setWorktreeInfoForTesting(id: worktree.id, pullRequest: makeMergedPullRequest())
+    let store = TestStore(
+      initialState: AppFeature.State(repositories: repositories, settings: settings)
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.date = .constant(Date(timeIntervalSince1970: 1_000_000))
+    }
+    store.exhaustivity = .off
+
+    // Merged worktrees never prompt, even when the policy would otherwise require it.
+    await store.send(.deeplink(.worktree(id: worktree.id, action: .archive)))
+    #expect(store.state.deeplinkInputConfirmation == nil)
+    await store.receive(\.repositories.archiveWorktreeConfirmed)
+  }
+
+  @Test(.dependencies) func archiveMainWorktreeDeeplinkRejected() async {
+    let main = makeWorktree(id: "/tmp/repo", name: "main")
+    let store = makeStore(worktree: main)
+
+    await store.send(.deeplink(.worktree(id: main.id, action: .archive), source: .socket))
+    #expect(store.state.alert != nil)
+    #expect(store.state.deeplinkInputConfirmation == nil)
+    #expect(store.state.pendingCommandAcks.isEmpty)
   }
 
   @Test(.dependencies) func archiveWorktreeDeeplinkWithUnknownIDShowsAlert() async {
@@ -277,11 +854,55 @@ struct AppFeatureDeeplinkTests {
 
   @Test(.dependencies) func stopWorktreeDeeplink() async {
     let worktree = makeWorktree()
-    let store = makeStore(worktree: worktree)
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+    store.exhaustivity = .off
 
     await store.send(.deeplink(.worktree(id: worktree.id, action: .stop)))
     await store.receive(\.repositories.selectWorktree)
-    await store.receive(\.stopRunScripts)
+    await store.finish()
+    let stoppedTarget = sent.value.contains {
+      if case .stopRunScript(let target, _) = $0 { return target.id == worktree.id }
+      return false
+    }
+    #expect(stoppedTarget)
+  }
+
+  /// Bare `stop` used to read the selected worktree, so a backgrounded call
+  /// would have stopped whatever the user happened to be looking at.
+  @Test(.dependencies) func stopWorktreeDeeplinkTargetsNamedWorktreeWhenBackgrounded() async {
+    let worktree = makeWorktree()
+    let target = makeWorktree(id: "/tmp/repo/wt-2", name: "wt-2")
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktrees: [worktree, target], selected: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in sent.withValue { $0.append(command) } }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.deeplink(.worktree(id: target.id, action: .stop, background: true)))
+    await store.finish()
+    #expect(store.state.repositories.selection == .worktree(worktree.id))
+    let stoppedTarget = sent.value.contains {
+      if case .stopRunScript(let stopped, _) = $0 { return stopped.id == target.id }
+      return false
+    }
+    #expect(stoppedTarget)
   }
 
   // MARK: - Named script deeplinks.
@@ -337,7 +958,7 @@ struct AppFeatureDeeplinkTests {
 
     #expect(store.state.deeplinkInputConfirmation == nil)
     let hasRun = sent.value.contains(where: {
-      if case .runBlockingScript(_, .script(let sentDefinition), _) = $0 {
+      if case .runBlockingScript(_, .script(let sentDefinition), _, _) = $0 {
         return sentDefinition.id == definition.id
       }
       return false
@@ -382,7 +1003,7 @@ struct AppFeatureDeeplinkTests {
 
     #expect(store.state.deeplinkInputConfirmation == nil)
     let hasStop = sent.value.contains(where: {
-      if case .stopScript(_, let definitionID) = $0 { return definitionID == definition.id }
+      if case .stopScript(_, let definitionID, _) = $0 { return definitionID == definition.id }
       return false
     })
     #expect(hasStop)
@@ -423,7 +1044,7 @@ struct AppFeatureDeeplinkTests {
     await store.finish()
 
     let hasRun = sent.value.contains(where: {
-      if case .runBlockingScript(_, .script(let definition), _) = $0 {
+      if case .runBlockingScript(_, .script(let definition), _, _) = $0 {
         return definition.id == globalScript.id
       }
       return false
@@ -458,7 +1079,7 @@ struct AppFeatureDeeplinkTests {
     await store.finish()
 
     let hasStop = sent.value.contains(where: {
-      if case .stopScript(_, let definitionID) = $0 { return definitionID == globalScript.id }
+      if case .stopScript(_, let definitionID, _) = $0 { return definitionID == globalScript.id }
       return false
     })
     #expect(hasStop)
@@ -498,7 +1119,7 @@ struct AppFeatureDeeplinkTests {
     await store.finish()
 
     let runCommands = sent.value.compactMap { command -> ScriptDefinition? in
-      if case .runBlockingScript(_, .script(let def), _) = command { return def }
+      if case .runBlockingScript(_, .script(let def), _, _) = command { return def }
       return nil
     }
     #expect(runCommands.count == 1)
@@ -648,7 +1269,7 @@ struct AppFeatureDeeplinkTests {
     await store.finish()
 
     let hasRun = sent.value.contains(where: {
-      if case .runBlockingScript(_, .script(let sentDefinition), _) = $0 {
+      if case .runBlockingScript(_, .script(let sentDefinition), _, _) = $0 {
         return sentDefinition.id == definition.id
       }
       return false
@@ -1310,10 +1931,311 @@ struct AppFeatureDeeplinkTests {
 
     await store.send(.deeplink(.worktree(id: worktree.id, action: .tabNew(input: nil, id: nil))))
     let hasCreateTab = sent.value.contains(where: {
-      if case .createTab(let target, _, _) = $0 { return target.id == worktree.id }
+      if case .createTab(let target, _, _, _, _) = $0 { return target.id == worktree.id }
       return false
     })
     #expect(hasCreateTab)
+  }
+
+  @Test(.dependencies) func tabNewWithTitleCreatesNamedTerminal() async {
+    let worktree = makeWorktree()
+    let tabID = UUID()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in
+        sent.withValue { $0.append(command) }
+      }
+      $0.terminalClient.tabExists = { _, _ in false }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .worktree(
+          id: worktree.id,
+          action: .tabNew(input: nil, id: tabID, title: "implement")
+        )
+      )
+    )
+    #expect(
+      sent.value.contains(
+        .createTab(
+          worktree,
+          runSetupScriptIfNew: true,
+          id: tabID,
+          title: "implement"
+        )
+      )
+    )
+  }
+
+  @Test(.dependencies) func tabNewWithInputPreservesTitleThroughConfirmation() async {
+    let worktree = makeWorktree()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    var initialState = AppFeature.State(
+      repositories: makeRepositoriesState(worktree: worktree),
+      settings: SettingsFeature.State(),
+    )
+    initialState.deeplinkInputConfirmation = DeeplinkInputConfirmationFeature.State(
+      worktreeID: worktree.id,
+      worktreeName: worktree.name,
+      repositoryName: "repo",
+      message: .command("omp"),
+      action: .tabNew(input: "omp", id: nil, title: "implement"),
+    )
+    let store = TestStore(initialState: initialState) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in
+        sent.withValue { $0.append(command) }
+      }
+    }
+    store.exhaustivity = .off
+
+    await withKnownIssue("TCA @Presents dismiss tracking") {
+      await store.send(
+        .deeplinkInputConfirmation(
+          .presented(
+            .delegate(
+              .confirm(
+                worktreeID: worktree.id,
+                action: .tabNew(input: "omp", id: nil, title: "implement"),
+                alwaysAllow: false
+              )
+            )
+          )
+        )
+      ) {
+        $0.deeplinkInputConfirmation = nil
+      }
+    }
+    #expect(
+      sent.value.contains(
+        .createTabWithInput(
+          worktree,
+          input: "omp",
+          runSetupScriptIfNew: false,
+          id: nil,
+          title: "implement"
+        )
+      )
+    )
+    await store.finish()
+  }
+
+  @Test(.dependencies) func tabRenameUpdatesExistingTab() async {
+    let worktree = makeWorktree()
+    let tabID = UUID()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in
+        sent.withValue { $0.append(command) }
+      }
+      $0.terminalClient.tabExists = { worktreeID, candidate in
+        worktreeID == worktree.id && candidate.rawValue == tabID
+      }
+      $0.terminalClient.tabCanRename = { worktreeID, candidate in
+        worktreeID == worktree.id && candidate.rawValue == tabID
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .worktree(id: worktree.id, action: .tabRename(tabID: tabID, title: "review"))
+      )
+    )
+    #expect(
+      sent.value.contains(
+        .renameTab(worktree, tabID: TerminalTabID(rawValue: tabID), title: "review")
+      )
+    )
+  }
+
+  @Test(.dependencies) func tabRenameWithEmptyTitleClearsOverride() async {
+    let worktree = makeWorktree()
+    let tabID = UUID()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in
+        sent.withValue { $0.append(command) }
+      }
+      $0.terminalClient.tabExists = { _, _ in true }
+      $0.terminalClient.tabCanRename = { _, _ in true }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .worktree(id: worktree.id, action: .tabRename(tabID: tabID, title: ""))
+      )
+    )
+    #expect(
+      sent.value.contains(
+        .renameTab(worktree, tabID: TerminalTabID(rawValue: tabID), title: "")
+      )
+    )
+    #expect(store.state.alert == nil)
+  }
+
+  @Test(.dependencies) func tabRenameWithControlOnlyTitleShowsAlertAndSendsNothing() async {
+    let worktree = makeWorktree()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in
+        sent.withValue { $0.append(command) }
+      }
+      $0.terminalClient.tabExists = { _, _ in true }
+      $0.terminalClient.tabCanRename = { _, _ in true }
+    }
+    store.exhaustivity = .off
+
+    // Only an escape: it is not a clear, and it must not wipe the existing title.
+    await store.send(
+      .deeplink(
+        .worktree(id: worktree.id, action: .tabRename(tabID: UUID(), title: "\u{1B}"))
+      )
+    )
+    #expect(store.state.alert?.title == TextState("Tab title is blank"))
+    #expect(sent.value.isEmpty)
+  }
+
+  @Test(.dependencies) func tabRenameDoesNotSelectWorktree() async {
+    let worktree = makeWorktree()
+    let tabID = UUID()
+    var repositories = makeRepositoriesState(worktree: worktree)
+    repositories.selection = nil
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: repositories,
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { _ in }
+      $0.terminalClient.tabExists = { _, _ in true }
+      $0.terminalClient.tabCanRename = { _, _ in true }
+    }
+
+    // Exhaustive: a `selectWorktree` would fail here, so renaming cannot steal focus.
+    await store.send(
+      .deeplink(
+        .worktree(id: worktree.id, action: .tabRename(tabID: tabID, title: "review"))
+      )
+    )
+    await store.finish()
+    #expect(store.state.repositories.selection == nil)
+  }
+
+  @Test(.dependencies) func tabNewWithBlankTitleShowsAlertAndSendsNothing() async {
+    let worktree = makeWorktree()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in
+        sent.withValue { $0.append(command) }
+      }
+      $0.terminalClient.tabExists = { _, _ in false }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .worktree(id: worktree.id, action: .tabNew(input: nil, id: nil, title: "   "))
+      )
+    )
+    #expect(store.state.alert?.title == TextState("Tab title is blank"))
+    #expect(!sent.value.contains { if case .createTab = $0 { true } else { false } })
+  }
+
+  @Test(.dependencies) func tabRenameMissingTabShowsAlertAndSendsNothing() async {
+    let worktree = makeWorktree()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in
+        sent.withValue { $0.append(command) }
+      }
+      $0.terminalClient.tabExists = { _, _ in false }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .worktree(id: worktree.id, action: .tabRename(tabID: UUID(), title: "review"))
+      )
+    )
+    #expect(store.state.alert?.title == TextState("Tab not found"))
+    #expect(sent.value.isEmpty)
+  }
+
+  @Test(.dependencies) func tabRenameLockedTitleShowsAlertAndSendsNothing() async {
+    let worktree = makeWorktree()
+    let sent = LockIsolated<[TerminalClient.Command]>([])
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State(),
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.terminalClient.send = { command in
+        sent.withValue { $0.append(command) }
+      }
+      $0.terminalClient.tabExists = { _, _ in true }
+      $0.terminalClient.tabCanRename = { _, _ in false }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .worktree(id: worktree.id, action: .tabRename(tabID: UUID(), title: "review"))
+      )
+    )
+    #expect(store.state.alert?.title == TextState("Tab cannot be renamed"))
+    #expect(sent.value.isEmpty)
   }
 
   // MARK: - Queuing before load.
@@ -1611,6 +2533,266 @@ struct AppFeatureDeeplinkTests {
     #expect(
       observedDirectoryOverride.value
         == URL(filePath: "/tmp/elsewhere/feature_foo", directoryHint: .isDirectory).standardizedFileURL)
+  }
+
+  @Test(.dependencies) func repoWorktreeNewSetsUpstreamAfterCreation() async {
+    let worktree = makeWorktree()
+    let createdWorktree = makeWorktree()
+    struct SetUpstreamInvocation {
+      let branch: String
+      let upstream: String
+      let root: URL
+    }
+    let observedSetUpstream = LockIsolated<SetUpstreamInvocation?>(nil)
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.gitClient.localBranchNames = { _ in [] }
+      $0.gitClient.isValidBranchName = { _, _ in true }
+      $0.gitClient.isBareRepository = { _ in false }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+      $0.gitClient.ignoredFileCount = { _ in 0 }
+      $0.gitClient.untrackedFileCount = { _ in 0 }
+      $0.gitClient.upstreamBranchExists = { _, _ in true }
+      $0.gitClient.setUpstreamBranch = { branch, upstream, root in
+        observedSetUpstream.withValue { $0 = SetUpstreamInvocation(branch: branch, upstream: upstream, root: root) }
+      }
+      $0.gitClient.createWorktreeStream = { _, _, _, _, _, _, _ in
+        AsyncThrowingStream { continuation in
+          continuation.yield(.finished(createdWorktree))
+          continuation.finish()
+        }
+      }
+      $0.gitClient.worktrees = { _ in [createdWorktree] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .repoWorktreeNew(
+          repositoryID: "/tmp/repo",
+          branch: "feature-x",
+          baseRef: "origin/feature-x",
+          upstream: "origin/feature-x",
+          fetchOrigin: false,
+          worktreeName: nil,
+          worktreePath: nil
+        )
+      )
+    )
+    await store.receive(\.repositories.createRandomWorktreeSucceeded)
+    await store.finish()
+
+    #expect(observedSetUpstream.value?.branch == "feature-x")
+    #expect(observedSetUpstream.value?.upstream == "origin/feature-x")
+    #expect(observedSetUpstream.value?.root == URL(fileURLWithPath: "/tmp/repo"))
+  }
+
+  @Test(.dependencies) func repoWorktreeNewWithDeadUpstreamFailsBeforeCreation() async {
+    let worktree = makeWorktree()
+    let streamStarted = LockIsolated(false)
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.gitClient.localBranchNames = { _ in [] }
+      $0.gitClient.isValidBranchName = { _, _ in true }
+      $0.gitClient.isBareRepository = { _ in false }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+      $0.gitClient.ignoredFileCount = { _ in 0 }
+      $0.gitClient.untrackedFileCount = { _ in 0 }
+      $0.gitClient.upstreamBranchExists = { _, _ in false }
+      $0.gitClient.createWorktreeStream = { _, _, _, _, _, _, _ in
+        streamStarted.setValue(true)
+        return AsyncThrowingStream { $0.finish() }
+      }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .repoWorktreeNew(
+          repositoryID: "/tmp/repo",
+          branch: "feature-x",
+          baseRef: nil,
+          upstream: "origin/gone",
+          fetchOrigin: false,
+          worktreeName: nil,
+          worktreePath: nil
+        )
+      )
+    )
+    await store.receive(\.repositories.createRandomWorktreeFailed)
+    await store.finish()
+
+    #expect(!streamStarted.value)
+  }
+
+  @Test(.dependencies) func repoWorktreeNewWithoutBranchStillSetsUpstream() async {
+    let worktree = makeWorktree()
+    let createdWorktree = makeWorktree()
+    let observedUpstream = LockIsolated<String?>(nil)
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global.promptForWorktreeCreation = false }
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.gitClient.localBranchNames = { _ in [] }
+      $0.gitClient.isValidBranchName = { _, _ in true }
+      $0.gitClient.isBareRepository = { _ in false }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+      $0.gitClient.ignoredFileCount = { _ in 0 }
+      $0.gitClient.untrackedFileCount = { _ in 0 }
+      $0.gitClient.upstreamBranchExists = { _, _ in true }
+      $0.gitClient.setUpstreamBranch = { _, upstream, _ in
+        observedUpstream.setValue(upstream)
+      }
+      $0.gitClient.createWorktreeStream = { _, _, _, _, _, _, _ in
+        AsyncThrowingStream { continuation in
+          continuation.yield(.finished(createdWorktree))
+          continuation.finish()
+        }
+      }
+      $0.gitClient.worktrees = { _ in [createdWorktree] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .repoWorktreeNew(
+          repositoryID: "/tmp/repo",
+          branch: nil,
+          baseRef: nil,
+          upstream: "origin/feature-x",
+          fetchOrigin: false,
+          worktreeName: nil,
+          worktreePath: nil
+        )
+      )
+    )
+    await store.receive(\.repositories.createRandomWorktreeSucceeded)
+    await store.finish()
+
+    #expect(observedUpstream.value == "origin/feature-x")
+  }
+
+  @Test(.dependencies) func repoWorktreeNewWithEmptyUpstreamUnsetsTracking() async {
+    let worktree = makeWorktree()
+    let createdWorktree = makeWorktree()
+    let observedUnset = LockIsolated<String?>(nil)
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.gitClient.localBranchNames = { _ in [] }
+      $0.gitClient.isValidBranchName = { _, _ in true }
+      $0.gitClient.isBareRepository = { _ in false }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+      $0.gitClient.ignoredFileCount = { _ in 0 }
+      $0.gitClient.untrackedFileCount = { _ in 0 }
+      $0.gitClient.unsetUpstreamBranch = { branch, _ in
+        observedUnset.setValue(branch)
+      }
+      $0.gitClient.createWorktreeStream = { _, _, _, _, _, _, _ in
+        AsyncThrowingStream { continuation in
+          continuation.yield(.finished(createdWorktree))
+          continuation.finish()
+        }
+      }
+      $0.gitClient.worktrees = { _ in [createdWorktree] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .repoWorktreeNew(
+          repositoryID: "/tmp/repo",
+          branch: "feature-x",
+          baseRef: nil,
+          upstream: "",
+          fetchOrigin: false,
+          worktreeName: nil,
+          worktreePath: nil
+        )
+      )
+    )
+    await store.receive(\.repositories.createRandomWorktreeSucceeded)
+    await store.finish()
+
+    #expect(observedUnset.value == "feature-x")
+  }
+
+  @Test(.dependencies) func repoWorktreeNewWithPinLandsWorktreePinned() async {
+    // End-to-end deeplink chain: `pin=true` pre-pins the pending row and the
+    // created worktree ends in the persisted `.pinned` bucket.
+    let worktree = makeWorktree()
+    let createdWorktree = makeWorktree(id: "/tmp/repo/feature-x", name: "feature-x")
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: makeRepositoriesState(worktree: worktree),
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.gitClient.localBranchNames = { _ in [] }
+      $0.gitClient.isValidBranchName = { _, _ in true }
+      $0.gitClient.isBareRepository = { _ in false }
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+      $0.gitClient.ignoredFileCount = { _ in 0 }
+      $0.gitClient.untrackedFileCount = { _ in 0 }
+      $0.gitClient.createWorktreeStream = { _, _, _, _, _, _, _ in
+        AsyncThrowingStream { continuation in
+          continuation.yield(.finished(createdWorktree))
+          continuation.finish()
+        }
+      }
+      $0.gitClient.worktrees = { _ in [createdWorktree] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .deeplink(
+        .repoWorktreeNew(
+          repositoryID: "/tmp/repo",
+          branch: "feature-x",
+          baseRef: nil,
+          fetchOrigin: false,
+          worktreeName: nil,
+          worktreePath: nil,
+          pin: true
+        )
+      )
+    )
+    await store.receive(\.repositories.createRandomWorktreeSucceeded)
+    await store.finish()
+
+    let section = store.state.repositories.sidebar.sections["/tmp/repo"]
+    #expect(section?.buckets[.pinned]?.items[createdWorktree.id] != nil)
+    #expect(store.state.repositories.sidebarItems[id: createdWorktree.id]?.isPinned == true)
   }
 
   @Test(.dependencies) func repoWorktreeNewWithUnknownRepoShowsAlert() async {
@@ -2023,6 +3205,40 @@ struct AppFeatureDeeplinkTests {
     )
   }
 
+  /// Seeds a `.run`-kind script into the worktree's repository settings so the
+  /// storage-backed primary-script lookup resolves.
+  @discardableResult
+  private func seedRunScript(for worktree: Worktree, command: String) -> ScriptDefinition {
+    let definition = ScriptDefinition(
+      id: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA")!,
+      kind: .run,
+      command: command
+    )
+    @Shared(.repositorySettings(worktree.repositoryRootURL, host: worktree.host)) var settings
+    $settings.withLock { $0.scripts = [definition] }
+    return definition
+  }
+
+  /// State holding both worktrees with `selected` selected, so a background action
+  /// on the other one can be shown not to move the selection.
+  private func makeRepositoriesState(
+    worktrees: IdentifiedArrayOf<Worktree>,
+    selected: Worktree
+  ) -> RepositoriesFeature.State {
+    var repositoriesState = RepositoriesFeature.State()
+    repositoriesState.repositories = [
+      Repository(
+        id: "/tmp/repo",
+        rootURL: URL(fileURLWithPath: "/tmp/repo"),
+        name: "repo",
+        worktrees: worktrees,
+      )
+    ]
+    repositoriesState.selection = .worktree(selected.id)
+    repositoriesState.isInitialLoadComplete = true
+    return repositoriesState
+  }
+
   private func makeRepositoriesState(worktree: Worktree) -> RepositoriesFeature.State {
     let repository = makeRepository(worktree: worktree)
     var repositoriesState = RepositoriesFeature.State()
@@ -2030,6 +3246,62 @@ struct AppFeatureDeeplinkTests {
     repositoriesState.selection = .worktree(worktree.id)
     repositoriesState.isInitialLoadComplete = true
     return repositoriesState
+  }
+
+  /// `@Shared(.repositorySettings)` is process-global and keyed by root URL, so a
+  /// prior test can leave a non-empty archive script that would divert the archive
+  /// into the blocking-script path. Reset it so the flow runs straight to apply.
+  private func clearArchiveScript(for worktree: Worktree) {
+    @Shared(.repositorySettings(worktree.repositoryRootURL, host: worktree.host)) var settings
+    $settings.withLock { $0.archiveScript = "" }
+  }
+
+  private func makeMergedPullRequest() -> GithubPullRequest {
+    GithubPullRequest(
+      number: 1,
+      title: "PR",
+      state: "MERGED",
+      additions: 0,
+      deletions: 0,
+      isDraft: false,
+      reviewDecision: nil,
+      mergeable: nil,
+      mergeStateStatus: nil,
+      updatedAt: nil,
+      url: "https://example.com/pull/1",
+      headRefName: nil,
+      baseRefName: "main",
+      commitsCount: 1,
+      authorLogin: "khoi",
+      statusCheckRollup: nil,
+      mergeQueueEntry: nil
+    )
+  }
+
+  /// Store whose sidebar has `worktree` seeded into the `.pinned` bucket with
+  /// the given item payload, so appearance deeplink tests can assert title / color
+  /// preservation end to end. Returns the owning repository ID for lookups.
+  private func makeStoreWithSidebarItem(
+    worktree: Worktree,
+    item: SidebarState.Item
+  ) -> (TestStoreOf<AppFeature>, Repository.ID) {
+    var repositories = makeRepositoriesState(worktree: worktree)
+    let repositoryID = makeRepository(worktree: worktree).id
+    repositories.$sidebar.withLock { sidebar in
+      sidebar.sections[repositoryID, default: .init()]
+        .buckets[.pinned, default: .init()]
+        .items[worktree.id] = item
+    }
+    let store = TestStore(
+      initialState: AppFeature.State(
+        repositories: repositories,
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+    return (store, repositoryID)
   }
 
   private func makeStore(worktree: Worktree) -> TestStoreOf<AppFeature> {
@@ -2271,7 +3543,7 @@ struct AppFeatureDeeplinkTests {
     let worktree = makeWorktree()
     var repositoriesState = makeRepositoriesState(worktree: worktree)
     repositoriesState.reconcileSidebarForTesting()
-    repositoriesState.sidebarItems[id: worktree.id]?.agents = [
+    repositoriesState.sidebarItems[id: worktree.id]?.agentSnapshot.agents = [
       .init(agent: .claude, activity: .busy)
     ]
     let store = TestStore(

@@ -1,8 +1,8 @@
-MARKETING_VERSION = 0.10.5
-CURRENT_PROJECT_VERSION = 145
+MARKETING_VERSION = 0.10.7
+CURRENT_PROJECT_VERSION = 147
 // Fork build-metadata tag appended to CFBundleShortVersionString. Empty for
 // upstream/Release builds; the Debug (jj fork) config overrides it to "+jj"
-// so the app reports e.g. 0.10.5+jj. Keeps MARKETING_VERSION semver-clean.
+// so the app reports e.g. 0.10.7+jj. Keeps MARKETING_VERSION semver-clean.
 SUPACODE_VERSION_SUFFIX =
 POSTHOG_API_KEY =
 POSTHOG_HOST =

@@ -20,6 +20,9 @@ struct GitClientDependency: Sendable {
   /// `/tmp/...` paths keep working; tests that exercise the
   /// missing-directory path override explicitly.
   var rootDirectoryExists: @Sendable (URL) async -> Bool
+  /// One-shot `git --version` probe classifying an environment-level git
+  /// failure (e.g. an unaccepted Xcode license). `nil` means git is usable.
+  var checkGitEnvironment: @Sendable () async -> GitEnvironmentError?
   var worktrees: @Sendable (URL) async throws -> [Worktree]
   var reconcileSupacodeLocks: @Sendable (URL) async -> Void
   var localBranchNames: @Sendable (URL) async throws -> Set<String>
@@ -69,6 +72,9 @@ struct GitClientDependency: Sendable {
   /// jj → `jj git push --bookmark`; git → `git push -u origin`.
   var pushBranch: @Sendable (_ name: String, _ repoRoot: URL) async throws -> Void
   var remoteInfo: @Sendable (_ repositoryRoot: URL) async -> GithubRemoteInfo?
+  var setUpstreamBranch: @Sendable (_ branch: String, _ upstream: String, _ repoRoot: URL) async throws -> Void
+  var unsetUpstreamBranch: @Sendable (_ branch: String, _ repoRoot: URL) async throws -> Void
+  var upstreamBranchExists: @Sendable (_ ref: String, _ repoRoot: URL) async throws -> Bool
 }
 
 extension GitClientDependency: DependencyKey {
@@ -101,6 +107,7 @@ extension GitClientDependency: DependencyKey {
         )
         return exists && isDirectory.boolValue
       },
+      checkGitEnvironment: { await GitClient(shell: shell).gitEnvironmentError() },
       worktrees: { root in
         // Route co-located repos that prefer jj to the Jujutsu backend; on any
         // jj failure (CLI missing/errored) degrade gracefully to Git so a
@@ -226,6 +233,15 @@ extension GitClientDependency: DependencyKey {
       },
       remoteInfo: { repositoryRoot in
         await GitClient(shell: shell).remoteInfo(for: repositoryRoot)
+      },
+      setUpstreamBranch: { branch, upstream, repoRoot in
+        try await GitClient(shell: shell).setUpstreamBranch(branch, to: upstream, for: repoRoot)
+      },
+      unsetUpstreamBranch: { branch, repoRoot in
+        try await GitClient(shell: shell).unsetUpstreamBranch(branch, for: repoRoot)
+      },
+      upstreamBranchExists: { ref, repoRoot in
+        try await GitClient(shell: shell).upstreamBranchExists(ref, for: repoRoot)
       }
     )
   }
@@ -241,6 +257,9 @@ extension GitClientDependency: DependencyKey {
     // tests override this closure explicitly.
     value.isColocatedJJRepository = { _ in false }
     value.rootDirectoryExists = { _ in true }
+    // Default to a healthy git environment so tests don't shell out to real
+    // `git --version`; the license-gate tests override this explicitly.
+    value.checkGitEnvironment = { nil }
     value.reconcileSupacodeLocks = { _ in }
     // `liveValue` shells out to real `git clone`; a no-op default keeps an
     // unstubbed test from cloning over the network. Clone tests override this.

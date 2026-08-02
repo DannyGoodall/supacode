@@ -16,6 +16,7 @@ private enum CancelID {
   static let worktreePromptLoad = "repositories.worktreePromptLoad"
   static let worktreePromptValidation = "repositories.worktreePromptValidation"
   static let resolveRemoteRepositories = "repositories.resolveRemoteRepositories"
+  static let resolveOpenActions = "repositories.resolveOpenActions"
   static func delayedPRRefresh(_ worktreeID: Worktree.ID) -> String {
     "repositories.delayedPRRefresh.\(worktreeID)"
   }
@@ -26,6 +27,8 @@ private enum CancelID {
 
 nonisolated let repositoriesLogger = SupaLogger("Repositories")
 private nonisolated let githubIntegrationRecoveryInterval: Duration = .seconds(15)
+private nonisolated let toastAutoDismissDelay: Duration = .milliseconds(2500)
+private nonisolated let delayedPullRequestRefreshDelay: Duration = .seconds(2)
 
 // Resolve `(host, owner, repo)` for a repository root. `gh repo
 // view` honours the user's default-repo resolution (fork →
@@ -97,6 +100,9 @@ struct RepositoriesFeature {
     var repositories: IdentifiedArrayOf<Repository> = []
     var repositoryRoots: [URL] = []
     var loadFailuresByID: [Repository.ID: String] = [:]
+    /// Set when git is environment-blocked (e.g. an unaccepted Xcode license):
+    /// drives the banner and suppresses the false per-repo "broken" rows.
+    var gitEnvironmentError: GitEnvironmentError?
     /// Remote repositories whose SSH listing is still resolving (shown with a
     /// loading spinner). Cleared per repo as each `.remoteRepositoryResolved`
     /// lands; a repo here with no `loadFailuresByID` entry is "loading", one
@@ -106,16 +112,58 @@ struct RepositoriesFeature {
     var isOpenPanelPresented = false
     var isInitialLoadComplete = false
     var pendingWorktrees: [PendingWorktree] = []
+    /// Creations cancelled while their git work was still in flight, consumed
+    /// by the success / failure terminal so a materialized worktree is deleted
+    /// instead of adopted. Never pruned early: the creation effect can't be
+    /// cancelled, so its terminal always fires and must see the flag even if
+    /// the repository was removed meanwhile.
+    var cancelRequestedPendingIDs: Set<Worktree.ID> = []
+    /// Where a materialized pending id resolved to, so stale UI snapshots (an
+    /// open context menu, the menu bar, a CLI-held id) keep working across the
+    /// pending → real swap.
+    struct ResolvedPendingWorktree: Equatable {
+      let worktreeID: Worktree.ID
+      let repositoryID: Repository.ID
+    }
+    /// Pruned when the real worktree leaves a load of its still-configured
+    /// repository, or when the repository itself is removed; a transiently
+    /// failed root keeps its entries.
+    var resolvedPendingWorktrees: [Worktree.ID: ResolvedPendingWorktree] = [:]
     /// In-flight customization payloads, keyed by `(repositoryID, branchName)`
     /// so the New Worktree prompt's `submit` delegate can hand title / color
     /// off without bloating four action signatures in the creation chain.
     /// Drained when the `PendingWorktree` materialises in `createWorktreeInRepository`,
     /// or on a prompt cancel / dismiss.
     var pendingCreationCustomizations: [Repository.ID: [String: PendingWorktree.Customization]] = [:]
-    /// CLI worktree-new ack ids parked while a creation prompt is open, keyed by
-    /// repository. Consumed when the prompt creates (so the id threads through to
-    /// the completion ack) or drained if the prompt is cancelled / dismissed.
-    var cliWorktreeAckPendingIDs: [Repository.ID: Worktree.ID] = [:]
+    /// A worktree-new request parked while a creation prompt is open. `pendingID`
+    /// is nil for URL-scheme callers, which have no ack to resolve.
+    struct ParkedWorktreeRequest: Equatable {
+      let pendingID: Worktree.ID?
+      let background: Bool
+      let pin: Bool
+      /// Explicit upstream from a CLI / deeplink caller; seeds the prompt so
+      /// the flag survives the interactive path.
+      let upstream: WorktreeUpstreamPreference
+
+      /// Nil when no field carries anything worth parking, so assigning the
+      /// result clears the slot instead of storing an inert record.
+      init?(
+        pendingID: Worktree.ID?,
+        background: Bool,
+        pin: Bool = false,
+        upstream: WorktreeUpstreamPreference = .automatic
+      ) {
+        guard pendingID != nil || background || pin || upstream != .automatic else { return nil }
+        self.pendingID = pendingID
+        self.background = background
+        self.pin = pin
+        self.upstream = upstream
+      }
+    }
+    /// Parked worktree-new requests keyed by repository. Consumed when the prompt
+    /// creates (so the ack id and the focus intent thread through) or drained if
+    /// the prompt is cancelled / dismissed.
+    var parkedWorktreeRequests: [Repository.ID: ParkedWorktreeRequest] = [:]
     /// In-flight repo-level removals keyed by repository id. Each record
     /// carries the disposition (only `.gitRepositoryUnlink` / `.folderUnlink`
     /// / `.folderTrash`) and the id of the owning batch aggregator that
@@ -128,7 +176,17 @@ struct RepositoriesFeature {
     var activeRemovalBatches: [BatchID: ActiveRemovalBatch] = [:]
     var autoDeleteArchivedWorktreesAfterDays: AutoDeletePeriod?
     var mergedWorktreeAction: MergedWorktreeAction?
-    var moveNotifiedWorktreeToTop = true
+    var moveNotifiedWorktreeToTop = false
+    /// Installed editors in menu order, mirrored down from `AppFeature` so the
+    /// sidebar context menu never probes LaunchServices while building.
+    var installedOpenActions: [OpenWorktreeAction] = []
+    /// Per-repo resolved open action, stored because resolving it reads
+    /// `@Shared(.repositorySettings(...))`, whose reference is cached weakly:
+    /// constructed from a view body it would re-run the key's (disk-reading)
+    /// load on every menu build. The disk pass (`.openActionsResolved`) is what makes it
+    /// authoritative, but `seedUnresolvedOpenActions` fills a new repository's entry from
+    /// what is already in memory first, so nothing ever reads an absent one.
+    var openActionByRepositoryID: [Repository.ID: OpenWorktreeAction] = [:]
     var shouldRestoreLastFocusedWorktree = false
     var shouldSelectFirstAfterReload = false
     var isRefreshingWorktrees = false
@@ -166,6 +224,12 @@ struct RepositoriesFeature {
     /// system-driven cleanup promotions.
     var worktreeHistoryBackStack: [Worktree.ID] = []
     var worktreeHistoryForwardStack: [Worktree.ID] = []
+    /// Session-only worktree MRU: most-recent-first, deduped, capped. Every
+    /// user-initiated worktree selection (hotkey, palette, and sidebar paths)
+    /// hoists the worktree to the head; launch-restore and validation paths
+    /// leave it untouched. Drives the ⌘P switcher sort, so ⌘P then Enter is a
+    /// Cmd+Tab-style toggle between the two most recent worktrees. Not persisted.
+    var worktreeMRU: [Worktree.ID] = []
     /// Single source of truth for all user-curated sidebar state —
     /// section order / collapse / pin / unpin / archive / focused
     /// worktree — persisted to `~/.supacode/sidebar.json`. Replaces
@@ -189,11 +253,21 @@ struct RepositoriesFeature {
     /// / notification mutations on the focused row don't invalidate the
     /// detail tree. Recomputed via `recomputeSelectedWorktreeSliceIfChanged()`.
     var selectedWorktreeSlice: SelectedWorktreeSlice?
+    /// Cached projection of the effective sidebar selection. The sidebar body
+    /// and the row context menu read this instead of deriving rows from
+    /// `sidebarItems`, which would observation-track every row. Recomputed via
+    /// `recomputeSidebarSelectionSliceIfChanged()`.
+    var sidebarSelectionSlice: SidebarSelectionSlice = .empty
     /// Cached toolbar notification snapshot. Detail body reads this instead of
     /// iterating `sidebarItems` (which would observe every per-row notification
     /// mutation across all worktrees). Recomputed via
     /// `recomputeToolbarNotificationGroupsIfChanged()`.
     var toolbarNotificationGroupsCache: [ToolbarNotificationRepositoryGroup] = []
+    /// Cached menu bar sections. The `MenuBarExtra` scene reads this instead of
+    /// `sidebarItems`, which would subscribe the status menu to every per-row
+    /// notification and agent tick. Recomputed via
+    /// `recomputeMenuBarSectionsIfChanged()`.
+    var menuBarSectionsCache = MenuBarSections()
     @Presents var worktreeCreationPrompt: WorktreeCreationPromptFeature.State?
     @Presents var repositoryCustomization: RepositoryCustomizationFeature.State?
     @Presents var worktreeCustomization: WorktreeCustomizationFeature.State?
@@ -289,6 +363,9 @@ struct RepositoriesFeature {
     case refreshWorktrees
     case reloadRepositories(animated: Bool)
     case repositoriesLoaded([Repository], failures: [LoadFailure], roots: [URL], animated: Bool)
+    /// Sole owner of `state.gitEnvironmentError`. Emitted by every load path with
+    /// the current git-environment probe result (`nil` clears the banner).
+    case gitEnvironmentChanged(GitEnvironmentError?)
     case selectionChanged(Set<SidebarSelection>, focusTerminal: Bool = false)
     case repositoryExpansionChanged(Repository.ID, isExpanded: Bool)
     case branchNestExpansionChanged(
@@ -297,6 +374,9 @@ struct RepositoriesFeature {
       prefix: String,
       isExpanded: Bool
     )
+    /// Expand or collapse every sidebar group at once. Expanding also clears
+    /// every nested branch-group prefix so the tree opens fully.
+    case setAllSidebarGroupsExpanded(Bool)
     case selectArchivedWorktrees
     case setSidebarSelectedWorktreeIDs(Set<Worktree.ID>)
     case openRepositories([URL])
@@ -316,16 +396,28 @@ struct RepositoriesFeature {
     case revealHoistedWorktreeInSidebar(Worktree.ID)
     case consumePendingSidebarReveal(Int)
     case createRandomWorktree
-    case createRandomWorktreeInRepository(Repository.ID, pendingID: Worktree.ID? = nil)
+    case createRandomWorktreeInRepository(
+      Repository.ID,
+      upstream: WorktreeUpstreamPreference = .automatic,
+      pendingID: Worktree.ID? = nil,
+      background: Bool = false,
+      pin: Bool = false
+    )
     /// A CLI-initiated creation prompt was abandoned; drains the parked ack.
     case cliWorktreeAckCancelled(pendingID: Worktree.ID)
+    /// User cancelled an in-flight creation; the row drops now, the git-side
+    /// cleanup happens when the creation's terminal action lands.
+    case cancelPendingWorktree(Worktree.ID)
     case createWorktreeInRepository(
       repositoryID: Repository.ID,
       nameSource: WorktreeCreationNameSource,
       baseRefSource: WorktreeCreationBaseRefSource,
+      upstream: WorktreeUpstreamPreference = .automatic,
       fetchOrigin: Bool,
       placement: WorktreePlacementOverride? = nil,
-      pendingID: Worktree.ID? = nil
+      pendingID: Worktree.ID? = nil,
+      background: Bool = false,
+      pin: Bool = false
     )
     case promptedWorktreeCreationDataLoaded(
       repositoryID: Repository.ID,
@@ -342,6 +434,7 @@ struct RepositoriesFeature {
       repositoryID: Repository.ID,
       branchName: String,
       baseRef: String?,
+      upstream: WorktreeUpstreamPreference = .automatic,
       fetchOrigin: Bool,
       placement: WorktreePlacementOverride
     )
@@ -349,6 +442,7 @@ struct RepositoriesFeature {
       repositoryID: Repository.ID,
       branchName: String,
       baseRef: String?,
+      upstream: WorktreeUpstreamPreference = .automatic,
       fetchOrigin: Bool,
       placement: WorktreePlacementOverride,
       duplicateMessage: String?
@@ -371,15 +465,17 @@ struct RepositoriesFeature {
     case consumeSetupScript(Worktree.ID)
     case consumeTerminalFocus(Worktree.ID)
     case scriptCompleted(
-      worktreeID: Worktree.ID, scriptID: UUID, kind: BlockingScriptKind, exitCode: Int?, tabId: TerminalTabID?)
+      worktreeID: Worktree.ID, kind: BlockingScriptKind, exitCode: Int?, tabId: TerminalTabID?)
     case requestArchiveWorktree(Worktree.ID, Repository.ID)
     case requestArchiveWorktrees([ArchiveWorktreeTarget])
-    case archiveWorktreeConfirmed(Worktree.ID, Repository.ID)
+    case archiveWorktreeConfirmed(Worktree.ID, Repository.ID, background: Bool = false)
     case archiveScriptCompleted(worktreeID: Worktree.ID, exitCode: Int?, tabId: TerminalTabID?)
     case archiveWorktreeApply(Worktree.ID, Repository.ID)
+    case archiveWorktreeApplied(Worktree.ID)
+    case archiveWorktreeApplyFailed(Worktree.ID)
     case unarchiveWorktree(Worktree.ID)
     case requestDeleteSidebarItems([DeleteWorktreeTarget])
-    case deleteSidebarItemConfirmed(Worktree.ID, Repository.ID)
+    case deleteSidebarItemConfirmed(Worktree.ID, Repository.ID, background: Bool = false)
     case deleteScriptCompleted(worktreeID: Worktree.ID, exitCode: Int?, tabId: TerminalTabID?)
     case deleteWorktreeApply(Worktree.ID, Repository.ID)
     case worktreeDeleted(
@@ -424,7 +520,6 @@ struct RepositoriesFeature {
     case pushWorktreeBookmark(Worktree.ID)
     case presentAlert(title: String, message: String)
     case worktreeInfoEvent(WorktreeInfoWatcherClient.Event)
-    case worktreeNotificationReceived(Worktree.ID)
     case worktreeBranchNameLoaded(worktreeID: Worktree.ID, name: String)
     case worktreeChangeIdLoaded(worktreeID: Worktree.ID, changeId: ChangeIdDisplay?)
     case worktreeLineChangesLoaded(worktreeID: Worktree.ID, added: Int, removed: Int)
@@ -436,6 +531,21 @@ struct RepositoriesFeature {
       pullRequestsByWorktreeID: [Worktree.ID: GithubPullRequest?]
     )
     case setGithubIntegrationEnabled(Bool)
+    /// Installed editors resolved by `AppFeature`'s LaunchServices sweep. Mirrored
+    /// in through an action (not a direct child-state write) so the post-reduce
+    /// hook re-arms the open-action resolution.
+    case setInstalledOpenActions([OpenWorktreeAction])
+    /// A per-repo `openActionID` or the global default editor changed. Carries no
+    /// payload: resolution re-reads both from the settings files.
+    case openActionSettingsChanged
+    /// Rebuild `openActionByRepositoryID` off the main actor. Sent by `AppFeature`
+    /// on activation; every arm whose `cacheInvalidations` carry
+    /// `.openActionResolution` gets the same effect straight from the post-reduce
+    /// hook, without the extra action hop.
+    case resolveOpenActions
+    /// The resolution effect's result, merged into the map. The only writer of
+    /// `openActionByRepositoryID`.
+    case openActionsResolved([Repository.ID: OpenWorktreeAction])
     case setMergedWorktreeAction(MergedWorktreeAction?)
     case setAutoDeleteArchivedWorktreesAfterDays(AutoDeletePeriod?)
     case autoDeleteExpiredArchivedWorktrees
@@ -449,6 +559,9 @@ struct RepositoriesFeature {
     case openRepositorySettings(Repository.ID)
     case requestCustomizeRepository(Repository.ID)
     case requestCustomizeWorktree(Worktree.ID, Repository.ID)
+    /// Deeplink / CLI appearance update: overwrites the row's sidebar title and tint.
+    /// `nil` clears the field; omit-vs-clear was already resolved upstream in `AppFeature`.
+    case setWorktreeAppearance(Worktree.ID, Repository.ID, title: String?, color: RepositoryColor?)
     case requestRenameBranch(Worktree.ID, Repository.ID)
     case contextMenuOpenWorktree(Worktree.ID, OpenWorktreeAction)
     case worktreeCreationPrompt(PresentationAction<WorktreeCreationPromptFeature.Action>)
@@ -510,7 +623,10 @@ struct RepositoriesFeature {
     case openRepositorySettings(Repository.ID)
     case openWorktreeInApp(Worktree.ID, OpenWorktreeAction)
     case worktreeCreated(Worktree)
-    case runBlockingScript(Worktree, repositoryID: Repository.ID, kind: BlockingScriptKind, script: String)
+    case runBlockingScript(
+      Worktree, repositoryID: Repository.ID, kind: BlockingScriptKind, script: String,
+      focusing: Bool = true
+    )
     case selectTerminalTab(Worktree.ID, tabId: TerminalTabID)
   }
 
@@ -547,6 +663,17 @@ struct RepositoriesFeature {
   /// The id is self-descriptive, so it parses straight back into host + path; a
   /// failed / disconnected remote (which has no loaded `Repository`) is still
   /// editable.
+  /// Drains any parked request for `repositoryID`, cancelling its CLI ack when one
+  /// was parked. Inert for a request that carried only a focus intent.
+  private static func drainParkedRequest(
+    _ repositoryID: Repository.ID,
+    state: inout State
+  ) -> Effect<Action> {
+    guard let pendingID = state.parkedWorktreeRequests.removeValue(forKey: repositoryID)?.pendingID
+    else { return .none }
+    return .send(.cliWorktreeAckCancelled(pendingID: pendingID))
+  }
+
   static func presentRemoteConnectionEditForm(_ repositoryID: Repository.ID, state: inout State) {
     guard let (host, remotePath) = Self.parseRemoteRoot(repositoryID.rawValue) else { return }
     state.remoteConnectionForm = RemoteConnectionFormFeature.State.editing(
@@ -706,15 +833,10 @@ struct RepositoriesFeature {
           }
         )
 
-      case .scriptCompleted(let worktreeID, let scriptID, let kind, let exitCode, let tabId):
-        guard state.sidebarItems[id: worktreeID]?.runningScripts[id: scriptID] != nil else {
-          repositoriesLogger.debug("Ignoring scriptCompleted for \(worktreeID)/\(scriptID): not tracked")
-          return .none
-        }
-        let stopEffect: Effect<Action> = .send(
-          .sidebarItems(.element(id: worktreeID, action: .runningScriptStopped(id: scriptID)))
-        )
-        guard let exitCode, exitCode != 0 else { return stopEffect }
+      case .scriptCompleted(let worktreeID, let kind, let exitCode, let tabId):
+        // `runningScripts` reconciles from the terminal's row projection
+        // (sole populator), so completion here only surfaces failures.
+        guard let exitCode, exitCode != 0 else { return .none }
         state.alert = blockingScriptFailureAlert(
           kind: kind,
           exitCode: exitCode,
@@ -722,21 +844,38 @@ struct RepositoriesFeature {
           tabId: tabId,
           state: state
         )
-        return stopEffect
+        return .none
 
-      case .archiveWorktreeConfirmed(let worktreeID, let repositoryID):
+      case .archiveWorktreeConfirmed(let worktreeID, let repositoryID, let background):
+        state.alert = nil
+        guard state.removingRepositoryIDs[repositoryID] == nil else {
+          // Repo is being removed, so the archive can't proceed; resolve a
+          // deferred CLI ack as a failure instead of stranding it until timeout.
+          return .send(.archiveWorktreeApplyFailed(worktreeID))
+        }
         guard let repository = state.repositories[id: repositoryID],
           let worktree = repository.worktrees[id: worktreeID]
         else {
+          // Resolve a deferred CLI ack instead of stranding it until timeout.
+          return .send(.archiveWorktreeApplyFailed(worktreeID))
+        }
+        if state.isWorktreeArchived(worktreeID) {
+          // End state already reached, so a pending CLI ack resolves as success.
+          return .send(.archiveWorktreeApplied(worktreeID))
+        }
+        if state.sidebarItems[id: worktreeID]?.lifecycle == .archiving {
+          // The in-flight archive emits its own completion, which resolves any pending ack.
           return .none
         }
-        if state.isWorktreeArchived(worktreeID)
-          || state.sidebarItems[id: worktreeID]?.lifecycle == .archiving
-        {
-          state.alert = nil
-          return .none
+        // Revalidate at confirm: a stale UI dialog can outlive the conditions it
+        // was shown under (the row began deleting, or is a folder/main worktree).
+        // Reject and resolve any parked ack rather than archive mid-teardown.
+        guard repository.isGitRepository,
+          !state.isMainWorktree(worktree),
+          state.sidebarItems[id: worktreeID]?.lifecycle.isTerminating != true
+        else {
+          return .send(.archiveWorktreeApplyFailed(worktreeID))
         }
-        state.alert = nil
         @Shared(.repositorySettings(worktree.repositoryRootURL, host: worktree.host)) var repositorySettings
         let script = repositorySettings.archiveScript
         let trimmed = script.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -745,16 +884,32 @@ struct RepositoriesFeature {
         if trimmed.isEmpty || worktree.isMissing {
           return .send(.archiveWorktreeApply(worktreeID, repositoryID))
         }
-        return .merge(
+        // Publish `.archiving` before launching the script: `runBlockingScript`
+        // can synchronously emit a launch-failure completion, which the completion
+        // guards would discard as a stale non-archiving row if it raced ahead of
+        // the lifecycle transition. Concatenation orders the row change first.
+        return .concatenate(
           state.setRowLifecycleEffect(worktreeID, .archiving),
           .send(
-            .delegate(.runBlockingScript(worktree, repositoryID: repositoryID, kind: .archive, script: script))
+            .delegate(
+              .runBlockingScript(
+                worktree, repositoryID: repositoryID, kind: .archive, script: script,
+                focusing: !background))
           )
         )
 
       case .archiveScriptCompleted(let worktreeID, let exitCode, let tabId):
         guard state.sidebarItems[id: worktreeID]?.lifecycle == .archiving else {
           repositoriesLogger.debug("Ignoring archiveScriptCompleted for \(worktreeID): not archiving")
+          // A vanished row means the archive was torn down mid-script (its repo was
+          // removed and reconciled away), so no apply follows; resolve a parked CLI
+          // ack on exit 0 rather than strand it. A row that is merely present-but-
+          // non-archiving is a stale/duplicate completion: a newer archive re-parks
+          // its ack before marking the row archiving, so failing here would reject
+          // that newer ack. Leave it for the newer operation to resolve.
+          if exitCode == 0, state.sidebarItems[id: worktreeID] == nil {
+            return .send(.archiveWorktreeApplyFailed(worktreeID))
+          }
           return .none
         }
         let resetLifecycle = state.setRowLifecycleEffect(worktreeID, .idle)
@@ -769,7 +924,8 @@ struct RepositoriesFeature {
               message: "The archive script completed successfully, but the worktree could not be found."
                 + " It may have been removed."
             )
-            return resetLifecycle
+            // Resolve a deferred CLI ack instead of stranding it until timeout.
+            return .merge(resetLifecycle, .send(.archiveWorktreeApplyFailed(worktreeID)))
           }
           return .merge(resetLifecycle, .send(.archiveWorktreeApply(worktreeID, repositoryID)))
         case nil:
@@ -783,6 +939,11 @@ struct RepositoriesFeature {
         }
 
       case .archiveWorktreeApply(let worktreeID, let repositoryID):
+        guard state.removingRepositoryIDs[repositoryID] == nil else {
+          // Repo removal began while the archive ran; the archived end state would
+          // vanish with it, so fail the ack instead of recording a false success.
+          return .send(.archiveWorktreeApplyFailed(worktreeID))
+        }
         guard let repository = state.repositories[id: repositoryID],
           let worktree = repository.worktrees[id: worktreeID]
         else {
@@ -793,11 +954,12 @@ struct RepositoriesFeature {
             title: "Archive failed",
             message: "The worktree could not be found. It may have already been removed."
           )
-          return .none
+          return .send(.archiveWorktreeApplyFailed(worktreeID))
         }
         if state.isWorktreeArchived(worktreeID) {
           state.alert = nil
-          return .none
+          // End state already reached, so a pending CLI ack resolves as success.
+          return .send(.archiveWorktreeApplied(worktreeID))
         }
         let previousSelection = state.selectedWorktreeID
         let previousSelectedWorktree = state.worktree(for: previousSelection)
@@ -832,16 +994,21 @@ struct RepositoriesFeature {
           selectedWorktree: selectedWorktree,
         )
         var effects: [Effect<Action>] = [
-          .send(.delegate(.repositoriesChanged(repositories)))
+          .send(.delegate(.repositoriesChanged(repositories))),
+          .send(.archiveWorktreeApplied(worktree.id)),
         ]
         if selectionChanged {
           effects.append(.send(.delegate(.selectedWorktreeChanged(selectedWorktree))))
         }
         return .merge(effects)
 
+      case .archiveWorktreeApplied, .archiveWorktreeApplyFailed:
+        // Outbound completion signals; `AppFeature` resolves the CLI ack. No local state change.
+        return .none
+
       case .unarchiveWorktree(let worktreeID):
         guard let repositoryID = state.repositoryID(containing: worktreeID),
-          state.sidebar.sections[repositoryID]?.buckets[.archived]?.items[worktreeID] != nil
+          state.sidebar.isArchived(worktreeID, in: repositoryID)
         else {
           return .none
         }
@@ -1054,7 +1221,7 @@ struct RepositoriesFeature {
   var worktreeRemovalReducer: some Reducer<State, Action> {
     Reduce { state, action in
       switch action {
-      case .deleteSidebarItemConfirmed(let worktreeID, let repositoryID):
+      case .deleteSidebarItemConfirmed(let worktreeID, let repositoryID, let background):
         guard let repository = state.repositories[id: repositoryID],
           let worktree = repository.worktrees[id: worktreeID]
         else {
@@ -1136,7 +1303,10 @@ struct RepositoriesFeature {
         return .merge(
           state.setRowLifecycleEffect(worktree.id, .deletingScript),
           .send(
-            .delegate(.runBlockingScript(worktree, repositoryID: repositoryID, kind: .delete, script: script))
+            .delegate(
+              .runBlockingScript(
+                worktree, repositoryID: repositoryID, kind: .delete, script: script,
+                focusing: !background))
           )
         )
 
@@ -1412,11 +1582,12 @@ struct RepositoriesFeature {
           await repositoryPersistence.saveRoots(remaining)
           await repositoryPersistence.pruneRepositoryConfigs([repositoryID.rawValue])
           let roots = remaining.map { URL(fileURLWithPath: $0) }
-          let (repositories, failures) = await loadRepositoriesData(roots)
+          let loadResult = await loadRepositoriesData(roots)
+          await send(.gitEnvironmentChanged(loadResult.environmentError))
           await send(
             .repositoriesLoaded(
-              repositories,
-              failures: failures,
+              loadResult.repositories,
+              failures: loadResult.failures,
               roots: roots,
               animated: true
             )
@@ -1663,9 +1834,12 @@ struct RepositoriesFeature {
         let repositoryID,
         let nameSource,
         let baseRefSource,
+        let upstream,
         let fetchOrigin,
         let placement,
-        let providedPendingID
+        let providedPendingID,
+        let background,
+        let pin
       ):
         // Pull the parked branch name so every rejection arm can drain its (repo, branch) entry
         // through the same helper — keeps the dict from leaking when a creation is rejected via
@@ -1694,13 +1868,20 @@ struct RepositoriesFeature {
           return .none
         }
         // Remote repos create worktrees over ssh via `git worktree add`, then
-        // reload to re-list. This bypasses the local pending/stream flow below,
-        // but honors the same name + base-ref choices from the prompt.
+        // reload to re-list. This bypasses the local pending/stream flow below
+        // (so `pin` has no pending row to ride on and is ignored), but honors
+        // the same name + base-ref choices from the prompt.
         if repository.host != nil {
+          // Remote creations have no pending row to carry a customization, so
+          // drain the parked entry instead of leaking it.
+          if let rejectedBranchName {
+            state.dropPendingCustomization(repositoryID: repository.id, branchName: rejectedBranchName)
+          }
           return remoteCreateWorktree(
             repository: repository,
             nameSource: nameSource,
             baseRefSource: baseRefSource,
+            upstream: upstream,
             fetchOrigin: fetchOrigin,
             placement: placement
           )
@@ -1720,7 +1901,7 @@ struct RepositoriesFeature {
         let previousSelection = state.selectedWorktreeID
         // Honor a deeplink-supplied pending id so a CLI completion ack can
         // correlate this exact creation through to its success / failure.
-        let pendingID = providedPendingID ?? WorktreeID("pending:\(uuid().uuidString)")
+        let pendingID = providedPendingID ?? WorktreeID("\(WorktreeID.pendingPrefix)\(uuid().uuidString)")
         @Shared(.settingsFile) var settingsFile
         @Shared(.repositorySettings(repository.rootURL, host: repository.host)) var repositorySettings
         let globalDefaultWorktreeBaseDirectoryPath = settingsFile.global.defaultWorktreeBaseDirectoryPath
@@ -1753,11 +1934,15 @@ struct RepositoriesFeature {
             id: pendingID,
             repositoryID: repository.id,
             progress: WorktreeCreationProgress(stage: .loadingLocalBranches, worktreeName: initialWorktreeName),
-            customization: pendingCustomization
+            customization: pendingCustomization,
+            background: background,
+            pinned: pin
           )
         )
         Self.syncSidebar(&state)
-        state.setSingleWorktreeSelection(pendingID)
+        if !background {
+          state.setSingleWorktreeSelection(pendingID)
+        }
         let existingNames = Set(repository.worktrees.map { $0.name.lowercased() })
         let createWorktreeStream = gitClient.createWorktreeStream
         let isValidBranchName = gitClient.isValidBranchName
@@ -1969,6 +2154,35 @@ struct RepositoriesFeature {
                 )
               }
             }
+            // A dead or unverifiable upstream fails here, before `git worktree
+            // add` creates anything; `name: nil` skips the created-worktree cleanup.
+            if case .branch(let upstreamRef) = upstream {
+              func failCreation(title: String, message: String) async {
+                await send(
+                  .createRandomWorktreeFailed(
+                    title: title,
+                    message: message,
+                    pendingID: pendingID,
+                    previousSelection: previousSelection,
+                    repositoryID: repository.id,
+                    name: nil,
+                    baseDirectory: worktreeBaseDirectory
+                  )
+                )
+              }
+              do {
+                guard try await gitClient.upstreamBranchExists(upstreamRef, repository.rootURL) else {
+                  await failCreation(
+                    title: "Upstream branch not found",
+                    message: "'\(upstreamRef)' isn't a local or remote-tracking branch in this repository."
+                  )
+                  return
+                }
+              } catch {
+                await failCreation(title: "Unable to create worktree", message: error.localizedDescription)
+                return
+              }
+            }
             progress.copyIgnored = copyIgnored
             progress.copyUntracked = copyUntracked
             progress.ignoredFilesToCopyCount =
@@ -1981,6 +2195,7 @@ struct RepositoriesFeature {
               name: name,
               copyFiles: (ignored: copyIgnored, untracked: copyUntracked),
               baseRef: resolvedBaseRef,
+              upstream: upstream,
               directoryOverride: worktreeDirectoryURL
             )
             await send(
@@ -2015,6 +2230,21 @@ struct RepositoriesFeature {
                   )
                 }
               case .finished(let newWorktree):
+                // The worktree exists either way; a failed tracking update
+                // surfaces as an alert instead of failing the creation.
+                var upstreamFailureMessage: String?
+                do {
+                  switch upstream {
+                  case .automatic:
+                    break
+                  case .unset:
+                    try await gitClient.unsetUpstreamBranch(name, repository.rootURL)
+                  case .branch(let upstreamRef):
+                    try await gitClient.setUpstreamBranch(name, upstreamRef, repository.rootURL)
+                  }
+                } catch {
+                  upstreamFailureMessage = error.localizedDescription
+                }
                 if progressUpdateThrottle.flush() {
                   await send(
                     .pendingWorktreeProgressUpdated(
@@ -2030,6 +2260,14 @@ struct RepositoriesFeature {
                     pendingID: pendingID
                   )
                 )
+                if let upstreamFailureMessage {
+                  await send(
+                    .presentAlert(
+                      title: "Worktree created, upstream not updated",
+                      message: upstreamFailureMessage
+                    )
+                  )
+                }
                 return
               }
             }
@@ -2100,12 +2338,10 @@ struct RepositoriesFeature {
           state.queuedPullRequestRefreshByRepositoryID.removeAll()
           state.inFlightPullRequestRefreshRepositoryIDs.removeAll()
           state.inFlightPullRequestBranchSnapshotsByRepositoryID.removeAll()
+          let clock = clock
           return .run { send in
             while !Task.isCancelled {
-              try? await ContinuousClock().sleep(for: githubIntegrationRecoveryInterval)
-              guard !Task.isCancelled else {
-                return
-              }
+              try await clock.sleep(for: githubIntegrationRecoveryInterval)
               await send(.refreshGithubIntegrationAvailability)
             }
           }
@@ -2650,10 +2886,58 @@ struct RepositoriesFeature {
       case .setMoveNotifiedWorktreeToTop(let isEnabled):
         state.moveNotifiedWorktreeToTop = isEnabled
         return .none
+
+      case .setInstalledOpenActions(let installed):
+        guard state.installedOpenActions != installed else { return .none }
+        state.installedOpenActions = installed
+        return .none
+
+      case .openActionSettingsChanged:
+        // The post-reduce hook arms the resolution effect from the invalidation bits.
+        return .none
+
+      case .resolveOpenActions:
+        state.seedUnresolvedOpenActions()
+        return Self.resolveOpenActionsEffect(state: state)
+
+      case .openActionsResolved(let resolved):
+        // A repository can leave the roster while the pass is in flight, and the
+        // post-reduce prune has already run by the time this lands. Merging its entry
+        // back would resurrect a key nothing prunes again.
+        let updates = resolved.filter {
+          state.repositories[id: $0.key] != nil && state.openActionByRepositoryID[$0.key] != $0.value
+        }
+        guard !updates.isEmpty else { return .none }
+        state.openActionByRepositoryID.merge(updates) { _, resolved in resolved }
+        return .none
       default:
         return .none
       }
     }
+  }
+
+  /// Rebuilds the open-action map off the main actor. Every entry it resolves reads
+  /// that repository's `supacode.json`, so this must stay an effect: the synchronous
+  /// read on the reducer is what hung the sidebar's context menu.
+  ///
+  /// Re-reads every repository, every pass. Nothing watches `supacode.json`
+  /// (`RepositorySettingsKey.subscribe` is a no-op), so an entry resolved once would never
+  /// be revisited, and an agent or a `git pull` inside a Supacode terminal rewrites that
+  /// file with no activation to catch it. An unchanged result writes nothing.
+  static func resolveOpenActionsEffect(state: State) -> Effect<Action> {
+    // `.none` carries no cancellation id, so an empty pass can't cancel a live one.
+    guard !state.repositories.isEmpty else { return .none }
+    let inputs = state.repositories.map(OpenActionResolutionInput.init)
+    let installed = state.installedOpenActions
+    return .run { send in
+      // The `.openActionsResolved` arm drops what didn't change. Diffing here too
+      // would only compare against a creation-time snapshot, which is exactly the
+      // stale view that must not decide anything.
+      await send(.openActionsResolved(OpenActionResolver.resolve(inputs: inputs, installed: installed)))
+    }
+    // One cancellation id, so only ever one pass in flight: two overlapping passes
+    // could otherwise land out of order and merge an older snapshot over a newer one.
+    .cancellable(id: CancelID.resolveOpenActions, cancelInFlight: true)
   }
 
   /// Pin / unpin / toast / notification / worktree-info-event handlers, split from `body` to keep
@@ -2661,16 +2945,32 @@ struct RepositoriesFeature {
   var worktreeNotificationReducer: some Reducer<State, Action> {
     Reduce { state, action in
       switch action {
-      case .pinWorktree(let worktreeID):
-        // Git "main" worktrees never appear in any sidebar bucket (the
-        // seed pass skips them), so pinning one is a no-op. Folder
-        // synthetic worktrees satisfy `isMainWorktree` by geometry but
-        // ARE pinnable; scope the skip to git repos so folders fall
-        // through to the bucket machinery below.
+      case .pinWorktree(let rawWorktreeID):
+        let worktreeID = state.resolvedWorktreeID(for: rawWorktreeID)
+        // A still-creating row carries pin intent on its transient PendingWorktree;
+        // the pin lands on the real id when the creation materializes.
+        if let index = state.pendingWorktrees.firstIndex(where: { $0.id == worktreeID }) {
+          let pending = state.pendingWorktrees[index]
+          // A repo mid-removal is about to drop the row; don't fake a successful pin.
+          if state.removingRepositoryIDs[pending.repositoryID] != nil {
+            repositoriesLogger.warning("Ignoring pin for pending worktree \(worktreeID) in a removing repository.")
+            return .none
+          }
+          guard !pending.pinned else { return .none }
+          state.pendingWorktrees[index].pinned = true
+          analyticsClient.capture("worktree_pinned", nil)
+          Self.syncSidebar(&state)
+          return .none
+        }
+        // Git main worktrees render in the main slot, never the pinned list, so pinning is a no-op.
+        // Scope the skip to git repos: folder synthetics are `isMainWorktree` by geometry but ARE pinnable.
         guard let worktree = state.worktree(for: worktreeID),
           let repositoryID = state.repositoryID(containing: worktreeID),
           let repository = state.repositories[id: repositoryID]
         else {
+          // Reachable when a menu snapshot outlives its row (e.g. a pending id
+          // whose creation just materialized under a new id).
+          repositoriesLogger.warning("Ignoring pin for unresolvable worktree \(worktreeID).")
           return .none
         }
         if repository.isGitRepository, state.isMainWorktree(worktree) {
@@ -2683,36 +2983,30 @@ struct RepositoriesFeature {
         if state.isWorktreeArchived(worktreeID) { return .none }
         analyticsClient.capture("worktree_pinned", nil)
         state.$sidebar.withLock { sidebar in
-          // `removeAnywhere` + `insert` enforces the "exactly one bucket"
-          // invariant against pre-states that have the row in `.pinned` and
-          // `.unpinned` simultaneously (hand-edit, migrator race) and also
-          // handles the not-bucketed case (folders before first reconcile).
-          // The carried Item preserves user-set `title` / `color` across
-          // the bucket move. Prefer the logical source (`.unpinned`) so a
-          // corrupted double-bucket pre-state surfaces the live unpinned
-          // row's payload, not a stale `.pinned` sibling.
-          var carried =
-            sidebar.removeAnywhere(
-              worktree: worktreeID,
-              in: repositoryID,
-              preferring: [.unpinned, .pinned, .archived]
-            ) ?? .init()
-          carried.archivedAt = nil
-          sidebar.insert(
-            worktree: worktreeID,
-            in: repositoryID,
-            bucket: .pinned,
-            item: carried,
-            position: 0
-          )
+          sidebar.pin(worktree: worktreeID, in: repositoryID)
         }
         RepositoriesFeature.syncSidebar(&state)
         return .none
 
-      case .unpinWorktree(let worktreeID):
+      case .unpinWorktree(let rawWorktreeID):
+        let worktreeID = state.resolvedWorktreeID(for: rawWorktreeID)
+        // Mirror of the `pinWorktree` pending branch: drop the transient intent.
+        if let index = state.pendingWorktrees.firstIndex(where: { $0.id == worktreeID }) {
+          let pending = state.pendingWorktrees[index]
+          if state.removingRepositoryIDs[pending.repositoryID] != nil {
+            repositoriesLogger.warning("Ignoring unpin for pending worktree \(worktreeID) in a removing repository.")
+            return .none
+          }
+          guard pending.pinned else { return .none }
+          state.pendingWorktrees[index].pinned = false
+          analyticsClient.capture("worktree_unpinned", nil)
+          Self.syncSidebar(&state)
+          return .none
+        }
         guard let repositoryID = state.repositoryID(containing: worktreeID),
           state.repositories[id: repositoryID] != nil
         else {
+          repositoriesLogger.warning("Ignoring unpin for unresolvable worktree \(worktreeID).")
           return .none
         }
         // Mirrors the `pinWorktree` archive guard: don't let an archived
@@ -2721,25 +3015,7 @@ struct RepositoriesFeature {
         if state.isWorktreeArchived(worktreeID) { return .none }
         analyticsClient.capture("worktree_unpinned", nil)
         state.$sidebar.withLock { sidebar in
-          // Same invariant as `pinWorktree`: collapse any pre-existing
-          // bucket placement into a single `.unpinned` entry, carrying
-          // the Item forward so `title` / `color` survive unpin. Prefer
-          // `.pinned` so a corrupted double-bucket pre-state surfaces
-          // the live pinned row's payload over a stale unpinned sibling.
-          var carried =
-            sidebar.removeAnywhere(
-              worktree: worktreeID,
-              in: repositoryID,
-              preferring: [.pinned, .unpinned, .archived]
-            ) ?? .init()
-          carried.archivedAt = nil
-          sidebar.insert(
-            worktree: worktreeID,
-            in: repositoryID,
-            bucket: .unpinned,
-            item: carried,
-            position: 0
-          )
+          sidebar.unpin(worktree: worktreeID, in: repositoryID)
         }
         RepositoriesFeature.syncSidebar(&state)
         return .none
@@ -2780,8 +3056,9 @@ struct RepositoriesFeature {
         case .inProgress:
           return .cancel(id: CancelID.toastAutoDismiss)
         case .success:
+          let clock = clock
           return .run { send in
-            try? await ContinuousClock().sleep(for: .seconds(2.5))
+            try await clock.sleep(for: toastAutoDismissDelay)
             await send(.dismissToast)
           }
           .cancellable(id: CancelID.toastAutoDismiss, cancelInFlight: true)
@@ -2813,8 +3090,9 @@ struct RepositoriesFeature {
         }
         let repositoryRootURL = worktree.repositoryRootURL
         let worktreeIDs = repository.worktrees.map(\.id)
+        let clock = clock
         return .run { send in
-          try? await ContinuousClock().sleep(for: .seconds(2))
+          try await clock.sleep(for: delayedPullRequestRefreshDelay)
           await send(
             .worktreeInfoEvent(
               .repositoryPullRequestRefresh(
@@ -2825,37 +3103,6 @@ struct RepositoriesFeature {
           )
         }
         .cancellable(id: CancelID.delayedPRRefresh(worktreeID), cancelInFlight: true)
-
-      case .worktreeNotificationReceived(let worktreeID):
-        guard let repositoryID = state.repositoryID(containing: worktreeID),
-          let repository = state.repositories[id: repositoryID],
-          let worktree = repository.worktrees[id: worktreeID]
-        else {
-          return .none
-        }
-        if state.isWorktreeArchived(worktree.id) {
-          return .none
-        }
-
-        if state.moveNotifiedWorktreeToTop, !state.isMainWorktree(worktree), !state.isWorktreePinned(worktree) {
-          let reordered = state.reorderedUnpinnedWorktreeIDs(for: worktreeID, in: repository)
-          // Only reorder when the bumped worktree currently lives in
-          // (or is about to land in) the unpinned bucket, pinned
-          // rows live in `.pinned` and should not be perturbed by
-          // notification arrivals on a sibling.
-          let currentUnpinned = Array(
-            state.sidebar.sections[repositoryID]?.buckets[.unpinned]?.items.keys ?? []
-          )
-          if currentUnpinned != reordered {
-            withAnimation(.snappy(duration: 0.2)) {
-              state.$sidebar.withLock { sidebar in
-                sidebar.reorder(bucket: .unpinned, in: repositoryID, to: reordered)
-              }
-            }
-          }
-        }
-
-        return .none
 
       case .worktreeInfoEvent(let event):
         switch event {
@@ -3074,11 +3321,12 @@ struct RepositoriesFeature {
           let loadedPaths = await repositoryPersistence.loadRoots()
           let rootPaths = RepositoryPathNormalizer.normalize(loadedPaths)
           let roots = rootPaths.map { URL(fileURLWithPath: $0) }
-          let (repositories, failures) = await loadRepositoriesData(roots)
+          let loadResult = await loadRepositoriesData(roots)
+          await send(.gitEnvironmentChanged(loadResult.environmentError))
           await send(
             .repositoriesLoaded(
-              repositories,
-              failures: failures,
+              loadResult.repositories,
+              failures: loadResult.failures,
               roots: roots,
               animated: false
             )
@@ -3104,11 +3352,23 @@ struct RepositoriesFeature {
         let roots = state.repositoryRoots
         // A remote-only setup has no local roots, but the load path still
         // appends persisted remote configs, so a refresh must run for it.
-        guard !roots.isEmpty || !Self.persistedRemoteRepositoryRoots().isEmpty else {
+        // Also keep refreshing while environment-blocked (even with zero roots)
+        // so accepting the Xcode license re-probes and clears the banner without
+        // a relaunch.
+        guard
+          !roots.isEmpty || !Self.persistedRemoteRepositoryRoots().isEmpty
+            || state.gitEnvironmentError != nil
+        else {
           state.isRefreshingWorktrees = false
           return .none
         }
         return loadRepositories(roots, animated: animated)
+
+      case .gitEnvironmentChanged(let environmentError):
+        // Guard so the periodic refresh doesn't re-publish an unchanged value.
+        guard state.gitEnvironmentError != environmentError else { return .none }
+        state.gitEnvironmentError = environmentError
+        return .none
 
       case .repositoriesLoaded(let repositories, let failures, let roots, let animated):
         state.isRefreshingWorktrees = false
@@ -3121,9 +3381,12 @@ struct RepositoriesFeature {
         _ = applyRepositories(
           mergedRepositories,
           roots: roots,
-          // Don't prune archived worktree ids while remotes are still resolving:
-          // their worktrees aren't in the roster yet.
-          shouldPruneArchivedWorktreeIDs: failures.isEmpty && mergedRemote.resolvingIDs.isEmpty,
+          // Don't prune archived worktree ids while remotes are still resolving
+          // (their worktrees aren't in the roster yet) or while git is
+          // environment-blocked (the suppressed repos' worktrees are absent, so
+          // pruning would drop their curation for a transient failure).
+          shouldPruneArchivedWorktreeIDs: failures.isEmpty && mergedRemote.resolvingIDs.isEmpty
+            && state.gitEnvironmentError == nil,
           state: &state,
           animated: animated
         )
@@ -3238,23 +3501,18 @@ struct RepositoriesFeature {
               let root = try await gitClient.repoRoot(url)
               resolvedRoots.append(root)
             } catch {
-              // `gitClient.repoRoot` throws for non-git paths, but
-              // also for transient `wt` / subprocess failures. To
-              // avoid silently reclassifying a git repo as a folder
-              // on transient errors, double-check via the injected
-              // `gitClient.isGitRepository`: if the path actually
-              // has `.git`, surface the original error as an invalid
-              // root. Non-git readable directories are accepted as
-              // folder-kind repositories.
+              // `repoRoot` failed. A readable directory is still worth keeping: a
+              // plain folder repo, or a real git repo we can't resolve because git
+              // is environment-blocked. Either way persist it and let the load
+              // classify it (folder, blocked warning row, or a real failure once
+              // git returns). A non-directory is genuinely invalid.
               let standardized = url.standardizedFileURL
               var isDirectory: ObjCBool = false
               let exists = FileManager.default.fileExists(
                 atPath: standardized.path(percentEncoded: false),
                 isDirectory: &isDirectory
               )
-              if exists, isDirectory.boolValue,
-                await !gitClient.isGitRepository(standardized)
-              {
+              if exists, isDirectory.boolValue {
                 resolvedRoots.append(standardized)
               } else {
                 invalidRoots.append(url.path(percentEncoded: false))
@@ -3267,11 +3525,12 @@ struct RepositoriesFeature {
           let mergedPaths = RepositoryPathNormalizer.normalize(existingRootPaths + resolvedRootPaths)
           let mergedRoots = mergedPaths.map { URL(fileURLWithPath: $0) }
           await repositoryPersistence.saveRoots(mergedPaths)
-          let (repositories, failures) = await loadRepositoriesData(mergedRoots)
+          let loadResult = await loadRepositoriesData(mergedRoots)
+          await send(.gitEnvironmentChanged(loadResult.environmentError))
           await send(
             .openRepositoriesFinished(
-              repositories,
-              failures: failures,
+              loadResult.repositories,
+              failures: loadResult.failures,
               invalidRoots: invalidRoots,
               roots: mergedRoots
             )
@@ -3288,7 +3547,10 @@ struct RepositoriesFeature {
         _ = applyRepositories(
           mergedRemote.repositories,
           roots: roots,
-          shouldPruneArchivedWorktreeIDs: failures.isEmpty && mergedRemote.resolvingIDs.isEmpty,
+          // Keep archived curation while git is environment-blocked: the
+          // suppressed repos' worktrees are absent from the roster.
+          shouldPruneArchivedWorktreeIDs: failures.isEmpty && mergedRemote.resolvingIDs.isEmpty
+            && state.gitEnvironmentError == nil,
           state: &state,
           animated: false
         )
@@ -3383,6 +3645,30 @@ struct RepositoriesFeature {
         }
         return .none
 
+      case .setAllSidebarGroupsExpanded(let isExpanded):
+        // Iterate the full roster, not just `sidebar.sections.keys`: the section
+        // map is sparse (a repo renders expanded until something writes an
+        // entry), so collapsing must materialize one for every repo.
+        let repositoryIDs = state.repositories.map(\.id)
+        state.$sidebar.withLock { sidebar in
+          for repositoryID in repositoryIDs {
+            guard isExpanded else {
+              // Collapse keeps branch-group prefixes so each group's layout
+              // survives when its section reopens.
+              sidebar.sections[repositoryID, default: .init()].collapsed = true
+              continue
+            }
+            // A repo with no entry is already fully open, so nothing to undo.
+            guard var section = sidebar.sections[repositoryID] else { continue }
+            section.collapsed = false
+            for bucketID in Array(section.buckets.keys) {
+              section.buckets[bucketID]?.collapsedBranchPrefixes.removeAll()
+            }
+            sidebar.sections[repositoryID] = section
+          }
+        }
+        return .none
+
       case .selectArchivedWorktrees:
         state.selection = .archivedWorktrees
         state.sidebarSelectedWorktreeIDs = []
@@ -3397,7 +3683,8 @@ struct RepositoriesFeature {
         state.sidebarSelectedWorktreeIDs = nextWorktreeIDs
         return .none
 
-      case .selectWorktree(let worktreeID, let focusTerminal):
+      case .selectWorktree(let rawWorktreeID, let focusTerminal):
+        let worktreeID = rawWorktreeID.map { state.resolvedWorktreeID(for: $0) }
         state.setSingleWorktreeSelection(worktreeID)
         let selectedWorktree = state.worktree(for: worktreeID)
         var effects: [Effect<Action>] = [
@@ -3491,7 +3778,8 @@ struct RepositoriesFeature {
         }
         return .send(.createRandomWorktreeInRepository(repository.id))
 
-      case .createRandomWorktreeInRepository(let repositoryID, let pendingID):
+      case .createRandomWorktreeInRepository(
+        let repositoryID, let upstream, let pendingID, let background, let pin):
         // Drain a parked CLI ack when a guard rejects, so it can't only time out.
         let cancelAck: Effect<Action> =
           pendingID.map { .send(.cliWorktreeAckCancelled(pendingID: $0)) } ?? .none
@@ -3530,8 +3818,11 @@ struct RepositoriesFeature {
                 repositoryID: repository.id,
                 nameSource: .random,
                 baseRefSource: .repositorySetting,
+                upstream: upstream,
                 fetchOrigin: settingsFile.global.fetchOriginBeforeWorktreeCreation,
-                pendingID: pendingID
+                pendingID: pendingID,
+                background: background,
+                pin: pin
               )
             )
           )
@@ -3541,12 +3832,18 @@ struct RepositoriesFeature {
         // prompt supersedes any prior one (single slot), so drain a stale parked
         // id first instead of orphaning it (covers a user prompt replacing a CLI
         // one, and back-to-back CLI prompts).
-        let supersededAckEffects: [Effect<Action>] = state.cliWorktreeAckPendingIDs.values.map {
-          .send(.cliWorktreeAckCancelled(pendingID: $0))
-        }
-        state.cliWorktreeAckPendingIDs.removeAll()
-        if let pendingID {
-          state.cliWorktreeAckPendingIDs[repository.id] = pendingID
+        let supersededAckEffects: [Effect<Action>] = state.parkedWorktreeRequests.values
+          .compactMap(\.pendingID)
+          .map { .send(.cliWorktreeAckCancelled(pendingID: $0)) }
+        state.parkedWorktreeRequests.removeAll()
+        // Parked even without an ack id, so a URL-scheme caller's opt-out still
+        // reaches the create the prompt eventually dispatches.
+        state.parkedWorktreeRequests[repository.id] = .init(
+          pendingID: pendingID, background: background, pin: pin, upstream: upstream)
+        // Seed an already-open prompt so its own create picks the flag up; only
+        // an explicit choice seeds, so a default request can't clobber a pick.
+        if upstream != .automatic, state.worktreeCreationPrompt?.repositoryID == repository.id {
+          state.worktreeCreationPrompt?.selectedUpstream = upstream
         }
         @Shared(.repositorySettings(repository.rootURL, host: repository.host)) var repositorySettings
         let selectedBaseRef = repositorySettings.worktreeBaseRef
@@ -3604,8 +3901,7 @@ struct RepositoriesFeature {
         guard let repository = state.repositories[id: repositoryID] else {
           // The repo vanished mid-load, so the prompt never opens; drain the
           // parked ack instead of leaving it for the watchdog.
-          let ackPendingID = state.cliWorktreeAckPendingIDs.removeValue(forKey: repositoryID)
-          return ackPendingID.map { .send(.cliWorktreeAckCancelled(pendingID: $0)) } ?? .none
+          return Self.drainParkedRequest(repositoryID, state: &state)
         }
         @Shared(.settingsFile) var promptSettingsFile
         @Shared(.repositorySettings(repository.rootURL, host: repository.host)) var promptRepositorySettings
@@ -3625,6 +3921,8 @@ struct RepositoriesFeature {
           branchMenu: nil,
           branchName: "",
           selectedBaseRef: selectedBaseRef,
+          // Seed a parked CLI / deeplink upstream so the flag survives the prompt.
+          selectedUpstream: state.parkedWorktreeRequests[repository.id]?.upstream ?? .automatic,
           fetchOrigin: promptSettingsFile.global.fetchOriginBeforeWorktreeCreation,
           defaultWorktreeBaseDirectory: defaultWorktreeBaseDirectory,
           validationMessage: nil,
@@ -3660,6 +3958,15 @@ struct RepositoriesFeature {
         {
           prompt.selectedBaseRef = nil
         }
+        // Same reconciliation for a seeded upstream, so a typo'd CLI --upstream
+        // falls back to Auto in the picker instead of dead-ending the submit.
+        // Qualified refs are skipped: the inventory only carries short names.
+        if case .branch(let upstreamRef) = prompt.selectedUpstream, !inventory.isEmpty,
+          !upstreamRef.hasPrefix("refs/"),
+          !inventory.contains(ref: upstreamRef)
+        {
+          prompt.selectedUpstream = .automatic
+        }
         state.worktreeCreationPrompt = prompt
         return .none
 
@@ -3670,9 +3977,7 @@ struct RepositoriesFeature {
         ]
         if let repositoryID = state.worktreeCreationPrompt?.repositoryID {
           state.dropPendingCustomization(repositoryID: repositoryID)
-          if let ackPendingID = state.cliWorktreeAckPendingIDs.removeValue(forKey: repositoryID) {
-            cancelEffects.append(.send(.cliWorktreeAckCancelled(pendingID: ackPendingID)))
-          }
+          cancelEffects.append(Self.drainParkedRequest(repositoryID, state: &state))
         }
         state.worktreeCreationPrompt = nil
         return .merge(cancelEffects)
@@ -3684,6 +3989,7 @@ struct RepositoriesFeature {
               let repositoryID,
               let branchName,
               let baseRef,
+              let upstream,
               let fetchOrigin,
               let placement,
               let title,
@@ -3706,6 +4012,7 @@ struct RepositoriesFeature {
             repositoryID: repositoryID,
             branchName: branchName,
             baseRef: baseRef,
+            upstream: upstream,
             fetchOrigin: fetchOrigin,
             placement: placement
           )
@@ -3715,6 +4022,7 @@ struct RepositoriesFeature {
         let repositoryID,
         let branchName,
         let baseRef,
+        let upstream,
         let fetchOrigin,
         let placement
       ):
@@ -3727,8 +4035,7 @@ struct RepositoriesFeature {
           // Drain the just-stashed customization so a later retry with the same name doesn't pick
           // up the orphaned entry.
           state.dropPendingCustomization(repositoryID: repositoryID, branchName: branchName)
-          let ackPendingID = state.cliWorktreeAckPendingIDs.removeValue(forKey: repositoryID)
-          return ackPendingID.map { .send(.cliWorktreeAckCancelled(pendingID: $0)) } ?? .none
+          return Self.drainParkedRequest(repositoryID, state: &state)
         }
         state.worktreeCreationPrompt?.validationMessage = nil
         state.worktreeCreationPrompt?.isValidating = true
@@ -3754,6 +4061,7 @@ struct RepositoriesFeature {
               repositoryID: repositoryID,
               branchName: branchName,
               baseRef: baseRef,
+              upstream: upstream,
               fetchOrigin: fetchOrigin,
               placement: placement,
               duplicateMessage: duplicateMessage
@@ -3766,6 +4074,9 @@ struct RepositoriesFeature {
         let repositoryID,
         let branchName,
         let baseRef,
+        // The submitted snapshot is authoritative; a prompt mutation racing the
+        // duplicate check must not replace what the user submitted.
+        let upstream,
         let fetchOrigin,
         let placement,
         let duplicateMessage
@@ -3783,15 +4094,18 @@ struct RepositoriesFeature {
         state.worktreeCreationPrompt = nil
         // Consume the parked CLI ack id so it threads into this creation and the
         // subsequent success-path dismiss doesn't mistake it for a cancel.
-        let ackPendingID = state.cliWorktreeAckPendingIDs.removeValue(forKey: repositoryID)
+        let parked = state.parkedWorktreeRequests.removeValue(forKey: repositoryID)
         return .send(
           .createWorktreeInRepository(
             repositoryID: repositoryID,
             nameSource: .explicit(branchName),
             baseRefSource: .explicit(baseRef),
+            upstream: upstream,
             fetchOrigin: fetchOrigin,
             placement: placement,
-            pendingID: ackPendingID
+            pendingID: parked?.pendingID,
+            background: parked?.background ?? false,
+            pin: parked?.pin ?? false
           )
         )
 
@@ -3814,10 +4128,8 @@ struct RepositoriesFeature {
         ]
         // A still-parked ack means this dismiss is a back-out (the success path
         // consumes it first), so drain it instead of stranding it.
-        if let repositoryID = state.worktreeCreationPrompt?.repositoryID,
-          let ackPendingID = state.cliWorktreeAckPendingIDs.removeValue(forKey: repositoryID)
-        {
-          dismissEffects.append(.send(.cliWorktreeAckCancelled(pendingID: ackPendingID)))
+        if let repositoryID = state.worktreeCreationPrompt?.repositoryID {
+          dismissEffects.append(Self.drainParkedRequest(repositoryID, state: &state))
         }
         state.worktreeCreationPrompt = nil
         return .merge(dismissEffects)
@@ -3830,17 +4142,34 @@ struct RepositoriesFeature {
         Self.syncSidebar(&state)
         return .none
 
+      case .cancelPendingWorktree(let worktreeID):
+        return cancelPendingWorktree(worktreeID, state: &state)
+
       case .createRandomWorktreeSucceeded(
         let worktree,
         let repositoryID,
         let pendingID
       ):
+        if state.cancelRequestedPendingIDs.remove(pendingID) != nil {
+          return deleteCancelledCreation(worktree)
+        }
         analyticsClient.capture("worktree_created", nil)
-        // Capture the pending row's customization BEFORE the pending drops,
-        // then forward it to the bucketed Item so reconcile renders the
-        // user-typed title / color from the very first paint after the
-        // pending row swaps to the real worktree.
-        let carriedCustomization = state.pendingWorktrees.first(where: { $0.id == pendingID })?.customization
+        // Capture the pending row's cargo (customization, pin intent, background
+        // opt-out) BEFORE the pending drops so the bucketed Item reflects it from
+        // the first paint after the swap to the real worktree.
+        let carried = state.pendingWorktrees.first(where: { $0.id == pendingID })
+        if carried == nil {
+          // Either the roster-reload transfer already landed the pin / customization
+          // on the real id, or the row was pruned and the cargo is lost; log rather
+          // than silently stealing focus.
+          repositoriesLogger.warning("Pending worktree \(pendingID) vanished before its creation landed.")
+        }
+        let carriedCustomization = carried?.customization
+        let carriedBackground = carried?.background ?? false
+        state.resolvedPendingWorktrees[pendingID] = .init(
+          worktreeID: worktree.id,
+          repositoryID: repositoryID
+        )
         state.removePendingWorktree(pendingID)
         if state.selection == .worktree(pendingID) {
           // History was already recorded when the pending row was
@@ -3851,7 +4180,14 @@ struct RepositoriesFeature {
           state.setSingleWorktreeSelection(worktree.id, recordHistory: false)
         }
         state.insertWorktree(worktree, repositoryID: repositoryID)
-        if let carriedCustomization, carriedCustomization.title != nil || carriedCustomization.color != nil {
+        if carried?.pinned == true {
+          // Pin before the customization merge so the merged Item lands on the
+          // `.pinned` bucket instead of manufacturing an `.unpinned` sibling.
+          state.$sidebar.withLock { sidebar in
+            sidebar.pin(worktree: worktree.id, in: repositoryID)
+          }
+        }
+        if let carriedCustomization, carriedCustomization.hasContent {
           // Seed customization into whatever bucket currently holds the row (falls back to
           // `.unpinned` for a brand-new worktree). The bucket probe avoids manufacturing a
           // phantom double-bucket entry against a persisted `.pinned` Item.
@@ -3869,7 +4205,9 @@ struct RepositoriesFeature {
         // between the real-worktree swap and the setup-script path.
         state.sidebarItems[id: worktree.id]?.lifecycle = .pending
         return .merge(
-          .send(.sidebarItems(.element(id: worktree.id, action: .focusTerminalRequested))),
+          carriedBackground
+            ? .none
+            : .send(.sidebarItems(.element(id: worktree.id, action: .focusTerminalRequested))),
           .send(.reloadRepositories(animated: false)),
           .send(.delegate(.repositoriesChanged(state.repositories))),
           .send(.delegate(.selectedWorktreeChanged(state.worktree(for: state.selectedWorktreeID)))),
@@ -3886,14 +4224,23 @@ struct RepositoriesFeature {
         let baseDirectory
       ):
         let previousSelectedWorktree = state.worktree(for: previousSelection)
+        // A cancelled creation failing is the expected outcome, not an error
+        // worth alerting; the cleanup below still runs.
+        let wasCancelled = state.cancelRequestedPendingIDs.remove(pendingID) != nil
         state.removePendingWorktree(pendingID)
+        // A roster reload can have resolved this pending just before the
+        // failure; the cleanup below deletes the directory, so the mapping
+        // must not retarget onto the doomed worktree.
+        state.resolvedPendingWorktrees.removeValue(forKey: pendingID)
         state.restoreSelection(previousSelection, pendingID: pendingID)
         let cleanup = state.cleanupFailedWorktree(
           repositoryID: repositoryID,
           name: name,
           baseDirectory: baseDirectory,
         )
-        state.alert = messageAlert(title: title, message: message)
+        if !wasCancelled {
+          state.alert = messageAlert(title: title, message: message)
+        }
         let selectedWorktree = state.worktree(for: state.selectedWorktreeID)
         let selectionChanged = state.hasSelectionChanged(
           previousSelectionID: previousSelection,
@@ -3912,13 +4259,20 @@ struct RepositoriesFeature {
         // went through `$sidebar.withLock`, so no per-slice save
         // effects are needed here.
         if let cleanupWorktree = cleanup.worktree {
-          let cleanupClient = gitClient(for: cleanupWorktree)
-          effects.append(
-            .run { send in
-              _ = try? await cleanupClient.removeWorktree(cleanupWorktree, true)
-              await send(.reloadRepositories(animated: true))
-            }
-          )
+          if wasCancelled {
+            // A cancelled creation must not fail silently (its alert was
+            // suppressed above); the verified reap surfaces a surviving
+            // directory instead of quietly re-adopting it.
+            effects.append(deleteCancelledCreation(cleanupWorktree))
+          } else {
+            let cleanupClient = gitClient(for: cleanupWorktree)
+            effects.append(
+              .run { send in
+                _ = try? await cleanupClient.removeWorktree(cleanupWorktree, true)
+                await send(.reloadRepositories(animated: true))
+              }
+            )
+          }
         }
         return .merge(effects)
 
@@ -3930,7 +4284,8 @@ struct RepositoriesFeature {
         return .send(.sidebarItems(.element(id: id, action: .focusTerminalConsumed)))
 
       case .requestArchiveWorktree, .requestArchiveWorktrees, .scriptCompleted, .archiveWorktreeConfirmed,
-        .archiveScriptCompleted, .archiveWorktreeApply, .unarchiveWorktree, .requestDeleteSidebarItems:
+        .archiveScriptCompleted, .archiveWorktreeApply, .archiveWorktreeApplied, .archiveWorktreeApplyFailed,
+        .unarchiveWorktree, .requestDeleteSidebarItems:
         // Real handling lives in `worktreeRemovalReducer` (combined below) so `body` stays under the
         // type-checker's complexity limit; the `.alert(.presented(.confirm…))` arms there are matched
         // here by the trailing `.alert` catch-all returning `.none`.
@@ -3947,7 +4302,7 @@ struct RepositoriesFeature {
 
       case .pinWorktree, .unpinWorktree, .pushWorktreeBookmark, .presentAlert, .showToast, .dismissToast,
         .delayedPullRequestRefresh, .toggleInspectorPane, .setInspectorPresented,
-        .worktreeNotificationReceived, .worktreeInfoEvent:
+        .worktreeInfoEvent:
         // Real handling lives in `worktreeNotificationReducer` (combined below) to keep `body`
         // under the type-checker's complexity limit.
         return .none
@@ -3956,7 +4311,8 @@ struct RepositoriesFeature {
         .repositoryPullRequestRefreshCompleted, .worktreeBranchNameLoaded, .worktreeChangeIdLoaded,
         .worktreeLineChangesLoaded,
         .repositoryPullRequestsLoaded, .pullRequestAction, .setGithubIntegrationEnabled, .setMergedWorktreeAction,
-        .setAutoDeleteArchivedWorktreesAfterDays, .autoDeleteExpiredArchivedWorktrees, .setMoveNotifiedWorktreeToTop:
+        .setAutoDeleteArchivedWorktreesAfterDays, .autoDeleteExpiredArchivedWorktrees, .setMoveNotifiedWorktreeToTop,
+        .setInstalledOpenActions, .openActionSettingsChanged, .resolveOpenActions, .openActionsResolved:
         // Real handling lives in `githubIntegrationReducer` (combined below) to keep `body`
         // under the type-checker's complexity limit.
         return .none
@@ -3974,6 +4330,11 @@ struct RepositoriesFeature {
         // command-palette hookup can't write customization that the
         // sidebar would never display.
         guard repository.isGitRepository else {
+          return .none
+        }
+        // The sidebar disables customize while the repo is being removed; the
+        // palette has no disabled state, so gate the request here too.
+        guard state.removingRepositoryIDs[repositoryID] == nil else {
           return .none
         }
         let section = state.sidebar.sections[repositoryID]
@@ -4007,6 +4368,7 @@ struct RepositoriesFeature {
         return .none
 
       case .requestCustomizeWorktree,
+        .setWorktreeAppearance,
         .worktreeCustomization:
         // Handled by `WorktreeCustomizationParentReducer` below; main switch is at type-checker
         // capacity, so the customization arms are split out into a dedicated reducer.
@@ -4135,12 +4497,19 @@ struct RepositoriesFeature {
     // helper suppresses no-op rebuilds at the SwiftUI layer. Gated on
     // `\.sidebarStructureAutoRecompute` (defaults to true everywhere); a few
     // legacy tests that don't care about sidebar layout opt out via
-    // `withDependencies`.
+    // `withDependencies`, and the same knob parks the open-action resolution
+    // effect for them.
+    //
+    // The open-action bits launch an effect rather than a recompute: the map is
+    // read off disk, so `applyCacheRecomputes` must stay pure.
     Reduce { state, action in
       @Dependency(\.sidebarStructureAutoRecompute) var autoRecompute
       guard autoRecompute else { return .none }
-      state.applyCacheRecomputes(action.cacheInvalidations)
-      return .none
+      let invalidations = action.cacheInvalidations
+      state.applyCacheRecomputes(invalidations)
+      guard invalidations.contains(.openActionResolution) else { return .none }
+      state.seedUnresolvedOpenActions()
+      return Self.resolveOpenActionsEffect(state: state)
     }
   }
 
@@ -4197,11 +4566,12 @@ struct RepositoriesFeature {
           group.addTask { await gitClient.reconcileSupacodeLocks(root) }
         }
       }
-      let (repositories, failures) = await loadRepositoriesData(roots)
+      let loadResult = await loadRepositoriesData(roots)
+      await send(.gitEnvironmentChanged(loadResult.environmentError))
       await send(
         .repositoriesLoaded(
-          repositories,
-          failures: failures,
+          loadResult.repositories,
+          failures: loadResult.failures,
           roots: roots,
           animated: animated
         )
@@ -4308,6 +4678,14 @@ struct RepositoriesFeature {
     return worktrees.first(where: { !seen.insert($0.id).inserted })?.id
   }
 
+  /// Worktrees with duplicate ids removed, keeping the first occurrence (git
+  /// lists the main worktree first, so it wins a collision). See #616. Applied to
+  /// the raw listing, so a future sort must not run before it or the orphan wins.
+  nonisolated static func deduplicatedWorktrees(_ worktrees: [Worktree]) -> [Worktree] {
+    var seen: Set<Worktree.ID> = []
+    return worktrees.filter { seen.insert($0.id).inserted }
+  }
+
   /// Failure-row copy for a repository whose worktree listing names the same
   /// path more than once.
   nonisolated static func duplicateWorktreePathMessage(path: String) -> String {
@@ -4352,22 +4730,26 @@ struct RepositoriesFeature {
     let isColocatedJJ = jjIntegrationEnabled ? await gitClient.isColocatedJJRepository(root) : false
     do {
       let worktrees = try await gitClient.worktrees(root)
-      // A duplicate path means the repo's git config is corrupt (e.g. a stale
-      // `core.worktree`). Refuse it and surface a failure rather than guess
-      // which of the colliding entries is real.
+      // A duplicate path (e.g. a broken inner worktree git resolves up to the
+      // repo root, #616) must not take down the whole repo. Drop the repeat and
+      // load the remaining worktrees instead of refusing the repository.
       if let duplicate = firstDuplicateWorktreeID(in: worktrees) {
-        return WorktreesFetchResult(
-          root: root,
-          isGitRepository: true,
-          isColocatedJJ: isColocatedJJ,
-          worktrees: nil,
-          errorMessage: duplicateWorktreePathMessage(path: duplicate.rawValue)
+        repositoriesLogger.warning(
+          "Dropping duplicate worktree path \(duplicate.rawValue) in "
+            + "\(root.lastPathComponent); loading the remaining worktrees."
         )
       }
       return WorktreesFetchResult(
-        root: root, isGitRepository: true, isColocatedJJ: isColocatedJJ, worktrees: worktrees,
-        errorMessage: nil)
+        root: root,
+        isGitRepository: true,
+        isColocatedJJ: isColocatedJJ,
+        worktrees: deduplicatedWorktrees(worktrees),
+        errorMessage: nil
+      )
     } catch {
+      // Any git listing failure (blocked binary, transient error, or a real repo
+      // problem). Report it as a failed git root and let the loader's
+      // `git --version` probe decide, once, whether git itself is blocked.
       return WorktreesFetchResult(
         root: root,
         isGitRepository: true,
@@ -4378,7 +4760,23 @@ struct RepositoriesFeature {
     }
   }
 
-  private func loadRepositoriesData(_ roots: [URL]) async -> ([Repository], [LoadFailure]) {
+  /// A git root whose listing failed, held until the `git --version` probe
+  /// decides if git is really blocked (suppress under the banner) or working
+  /// (surface `message` as a real failure row).
+  private struct DeferredGitFailure {
+    let rootID: Repository.ID
+    let message: String
+  }
+
+  /// Result of a local repository load. A struct rather than a tuple so the
+  /// three payloads travel together without tripping the `large_tuple` lint.
+  private struct RepositoriesLoadResult {
+    let repositories: [Repository]
+    let failures: [LoadFailure]
+    let environmentError: GitEnvironmentError?
+  }
+
+  private func loadRepositoriesData(_ roots: [URL]) async -> RepositoriesLoadResult {
     // Read the experimental gate once, up front, and capture the plain Bool into
     // the `@Sendable` task closures below. When off, no root is ever classified
     // colocated-jj, so the classifier output is byte-for-byte identical to the
@@ -4404,6 +4802,9 @@ struct RepositoriesFeature {
 
     var loaded: [Repository] = []
     var failures: [LoadFailure] = []
+    // Git roots that failed to list, deferred until the probe decides whether
+    // git itself is blocked (see below).
+    var deferredGitFailures: [DeferredGitFailure] = []
     for root in roots {
       let normalizedRoot = root.standardizedFileURL
       let rootID = RepositoryID(normalizedRoot.path(percentEncoded: false))
@@ -4421,15 +4822,13 @@ struct RepositoriesFeature {
           )
           loaded.append(repository)
         } else {
-          failures.append(
-            LoadFailure(
-              rootID: rootID,
-              message: result.errorMessage ?? "Unknown error"
-            )
-          )
+          // A real block fails every git root, and we can't judge a repo broken
+          // while git is down, so defer the verdict to the probe below.
+          deferredGitFailures.append(
+            DeferredGitFailure(rootID: rootID, message: result.errorMessage ?? "Unknown error"))
         }
       } else if let errorMessage = result.errorMessage {
-        // Non-git root with an error — classifier couldn't open
+        // Non-git root with an error: the classifier couldn't open
         // the directory (missing / unmounted / unreadable).
         // Route through the same `LoadFailure` pipeline git
         // repos use so the sidebar shows the error row.
@@ -4437,7 +4836,7 @@ struct RepositoriesFeature {
           LoadFailure(rootID: rootID, message: errorMessage)
         )
       } else {
-        // Folder repository — synthesize a single main-like worktree
+        // Folder repository: synthesize a single main-like worktree
         // so the existing sidebar selection + terminal plumbing keeps
         // working without new entity types.
         let synthetic = Worktree(
@@ -4459,53 +4858,155 @@ struct RepositoriesFeature {
         loaded.append(repository)
       }
     }
+    // If any git repo loaded, git demonstrably works. Otherwise a direct
+    // `git --version` probe is the ground truth for whether git is
+    // environment-blocked: locale-independent (so it doesn't depend on a repo's
+    // stderr being English-matchable), and it disconfirms a repo error that
+    // merely echoes a gate phrase. It also covers a folder-only / empty roster.
+    // Blocked -> the deferred git failures become suppressed warning rows;
+    // working -> they were real repo problems and surface as failure rows.
+    var environmentError: GitEnvironmentError?
+    if !loaded.contains(where: \.isGitRepository) {
+      environmentError = await gitClient.checkGitEnvironment()
+    }
+    if environmentError == nil {
+      for failure in deferredGitFailures {
+        failures.append(LoadFailure(rootID: failure.rootID, message: failure.message))
+      }
+    }
     // Remote repositories are NOT resolved here: that SSH work runs
     // asynchronously after the load (`.resolveRemoteRepositories`) so an
     // unreachable host never blocks the initial sidebar. The `.repositoriesLoaded`
     // handler merges in their placeholders and triggers resolution.
-    return (loaded, failures)
+    return RepositoriesLoadResult(
+      repositories: loaded,
+      failures: failures,
+      environmentError: environmentError
+    )
   }
 
-  /// Customization transfer record produced by `prunedPendingWorktrees` and
-  /// consumed by `seedCustomizationForDiscoveredWorktree`. A struct rather
+  /// Cancelled mid-flight but the add ran to completion: delete the
+  /// materialized worktree (branch included) instead of adopting it.
+  private func deleteCancelledCreation(_ worktree: Worktree) -> Effect<Action> {
+    let cleanupClient = gitClient(for: worktree)
+    return .run { send in
+      do {
+        _ = try await cleanupClient.removeWorktree(worktree, true)
+      } catch {
+        await send(
+          .presentAlert(
+            title: "Unable to clean up cancelled worktree",
+            message: error.localizedDescription
+          )
+        )
+      }
+      // `removeWorktree` swallows most git failures internally; verify the
+      // directory is gone so a failed cleanup surfaces instead of being
+      // silently re-adopted by the reload below. Cancellable creations are
+      // local-only, so the filesystem check is authoritative.
+      let path = worktree.workingDirectory.path(percentEncoded: false)
+      if FileManager.default.fileExists(atPath: path) {
+        repositoriesLogger.error("Cancelled worktree \(worktree.name) survived cleanup at \(path).")
+        await send(
+          .presentAlert(
+            title: "Unable to clean up cancelled worktree",
+            message: "\(worktree.name) could not be removed and will reappear in the sidebar. Delete it manually."
+          )
+        )
+      }
+      await send(.reloadRepositories(animated: false))
+    }
+  }
+
+  /// Drops a still-creating row now and flags the id so the creation's
+  /// terminal action cleans up instead of adopting the result. Extracted from
+  /// `body` to stay under the type-checker's complexity limit.
+  private func cancelPendingWorktree(
+    _ worktreeID: Worktree.ID,
+    state: inout State
+  ) -> Effect<Action> {
+    guard let pending = state.pendingWorktrees.first(where: { $0.id == worktreeID }) else {
+      // Double-cancels are benign; anything else means a stale snapshot
+      // dispatched after the creation settled, which must not turn into a
+      // silent intent drop.
+      if !state.cancelRequestedPendingIDs.contains(worktreeID) {
+        repositoriesLogger.warning(
+          "Ignoring cancel for unresolvable pending worktree \(worktreeID); the creation may have finished."
+        )
+      }
+      return .none
+    }
+    analyticsClient.capture("worktree_creation_cancelled", nil)
+    // The git work may be past the point of no return; flag the id so the
+    // creation's terminal action cleans up instead of adopting the result.
+    state.cancelRequestedPendingIDs.insert(worktreeID)
+    let previousSelection = state.selectedWorktreeID
+    let previousSelectedWorktree = state.worktree(for: previousSelection)
+    withAnimation(.easeOut(duration: 0.2)) {
+      // Reset the leaf synchronously so the same-tick reconcile drops it
+      // instead of carrying it forward as an in-flight row.
+      state.resetRowLifecycleSyncBeforeReconcile(itemID: worktreeID)
+      state.removePendingWorktree(worktreeID)
+      if state.selection == .worktree(worktreeID) {
+        let nextWorktreeID = state.firstAvailableWorktreeID(in: pending.repositoryID)
+        state.setSingleWorktreeSelection(nextWorktreeID, recordHistory: false)
+        // Mirror `restoreSelection`: the pending selection pushed this entry,
+        // so restoring to it must not leave a self-referential top.
+        if let nextWorktreeID, state.worktreeHistoryBackStack.last == nextWorktreeID {
+          state.worktreeHistoryBackStack.removeLast()
+        }
+      }
+      Self.syncSidebar(&state)
+    }
+    let selectedWorktree = state.worktree(for: state.selectedWorktreeID)
+    let selectionChanged = state.hasSelectionChanged(
+      previousSelectionID: previousSelection,
+      previousSelectedWorktree: previousSelectedWorktree,
+      selectedWorktreeID: state.selectedWorktreeID,
+      selectedWorktree: selectedWorktree,
+    )
+    return .merge(
+      .send(.cliWorktreeAckCancelled(pendingID: worktreeID)),
+      selectionChanged
+        ? .send(.delegate(.selectedWorktreeChanged(selectedWorktree)))
+        : .none
+    )
+  }
+
+  /// Pin / customization transfer record produced by `prunedPendingWorktrees`
+  /// and consumed by `seedTransferForDiscoveredWorktree`. A struct rather
   /// than a tuple so the two helpers can pass the payload around without
   /// tripping the `large_tuple` lint.
-  private struct PendingCustomizationTransfer {
+  private struct PendingWorktreeTransfer {
+    let pendingID: Worktree.ID
     let repositoryID: Repository.ID
     let worktreeName: String
-    let customization: PendingWorktree.Customization
+    let customization: PendingWorktree.Customization?
+    let pinned: Bool
   }
 
   /// Filter `state.pendingWorktrees` against a freshly-loaded roster. Pending
   /// rows whose `worktreeName` matches a newly-discovered worktree are pruned
-  /// and (when customized) hand their title / color to the caller for
-  /// transfer onto the bucketed Item. Pending rows without a final name fall
-  /// back to a count-based drop so the random-name path keeps its old shape.
+  /// and (when customized or pinned) hand their title / color / pin to the
+  /// caller for transfer onto the bucketed Item. Unnamed rows always survive:
+  /// no name means `git worktree add` hasn't run yet, so a discovery can only
+  /// be a sibling's and dropping here would delete the wrong creation's
+  /// pin / customization / background state.
   private func prunedPendingWorktrees(
     state: State,
     repositories: [Repository],
-    repositoryIDs: Set<Repository.ID>
-  ) -> ([PendingWorktree], [PendingCustomizationTransfer]) {
-    let previousCounts = Dictionary(
-      uniqueKeysWithValues: state.repositories.map { ($0.id, $0.worktrees.count) }
-    )
-    let newCounts = Dictionary(uniqueKeysWithValues: repositories.map { ($0.id, $0.worktrees.count) })
-    var addedCounts: [Repository.ID: Int] = [:]
-    for (id, newCount) in newCounts {
-      let added = newCount - (previousCounts[id] ?? 0)
-      if added > 0 { addedCounts[id] = added }
-    }
+    repositoryIDs: Set<Repository.ID>,
+    configuredRepositoryIDs: Set<Repository.ID>
+  ) -> ([PendingWorktree], [PendingWorktreeTransfer]) {
     var remainingDiscoveredNamesByRepo: [Repository.ID: Set<String>] = [:]
     for repository in repositories {
       let previousNames = Set(state.repositories[id: repository.id]?.worktrees.map(\.name) ?? [])
       let added = Set(repository.worktrees.map(\.name)).subtracting(previousNames)
       if !added.isEmpty { remainingDiscoveredNamesByRepo[repository.id] = added }
     }
-    var transfers: [PendingCustomizationTransfer] = []
-    // Pass 1: consume name matches up front. This drains the discovered-name
-    // set AND the count budget so the count-based fallback in pass 2 only
-    // fires for the leftover budget, never for a discovered name that a
-    // later pending row was going to match.
+    var transfers: [PendingWorktreeTransfer] = []
+    // Drain the discovered-name set as matches consume it so two concurrent
+    // creations with the same name can't both claim one discovery.
     var droppedPendingIDs: Set<Worktree.ID> = []
     for pending in state.pendingWorktrees {
       guard repositoryIDs.contains(pending.repositoryID),
@@ -4513,57 +5014,74 @@ struct RepositoriesFeature {
         remainingDiscoveredNamesByRepo[pending.repositoryID]?.contains(pendingName) == true
       else { continue }
       remainingDiscoveredNamesByRepo[pending.repositoryID]?.remove(pendingName)
-      if let customization = pending.customization,
-        customization.title != nil || customization.color != nil
-      {
-        transfers.append(
-          PendingCustomizationTransfer(
-            repositoryID: pending.repositoryID,
-            worktreeName: pendingName,
-            customization: customization,
-          )
+      // Every match transfers, payload or not, so the pending → real id
+      // resolution lands even for a plain uncustomized row.
+      transfers.append(
+        PendingWorktreeTransfer(
+          pendingID: pending.id,
+          repositoryID: pending.repositoryID,
+          worktreeName: pendingName,
+          customization: pending.customization.flatMap { $0.hasContent ? $0 : nil },
+          pinned: pending.pinned,
         )
-      }
-      addedCounts[pending.repositoryID, default: 0] = max(0, (addedCounts[pending.repositoryID] ?? 0) - 1)
+      )
       droppedPendingIDs.insert(pending.id)
     }
-    // Pass 2: count-based drop for the unnamed remainder. Named pending rows
-    // only drop via pass 1's exact name match; otherwise concurrent creations
-    // can prune the wrong row when only a sibling worktree appears.
     let filtered = state.pendingWorktrees.filter { pending in
-      guard repositoryIDs.contains(pending.repositoryID) else { return false }
-      if droppedPendingIDs.contains(pending.id) { return false }
-      if pending.progress.worktreeName != nil { return true }
-      guard let remaining = addedCounts[pending.repositoryID], remaining > 0 else { return true }
-      addedCounts[pending.repositoryID] = remaining - 1
-      return false
+      // A repo absent from this load but still configured is a transient miss;
+      // its creations stay alive (their terminal actions still fire). Rows die
+      // only with their repository's removal.
+      guard
+        repositoryIDs.contains(pending.repositoryID)
+          || configuredRepositoryIDs.contains(pending.repositoryID)
+      else { return false }
+      return !droppedPendingIDs.contains(pending.id)
     }
     return (filtered, transfers)
   }
 
-  /// Write each transferred pending customization onto the bucketed Item for
-  /// the matching newly-discovered worktree. Skips fields the user has
-  /// already set via Customize Worktree… so the bucketed Item stays
-  /// authoritative once non-nil.
-  private func seedCustomizationForDiscoveredWorktree(
-    transfers: [PendingCustomizationTransfer],
+  /// Write each transferred pending pin / customization onto the bucketed Item
+  /// for the matching newly-discovered worktree, and record the pending → real
+  /// id resolution. Pins first so the merged Item lands on the `.pinned`
+  /// bucket; merge skips fields the user has already set via Customize
+  /// Worktree… so the bucketed Item stays authoritative once non-nil.
+  private func seedTransferForDiscoveredWorktree(
+    transfers: [PendingWorktreeTransfer],
     repositories: [Repository],
     state: inout State
   ) {
     guard !transfers.isEmpty else { return }
+    var resolvedIDs: [(pendingID: Worktree.ID, resolved: State.ResolvedPendingWorktree)] = []
     state.$sidebar.withLock { sidebar in
       for transfer in transfers {
         guard
           let worktreeID = repositories.first(where: { $0.id == transfer.repositoryID })?
             .worktrees.first(where: { $0.name == transfer.worktreeName })?.id
-        else { continue }
-        sidebar.mergeCustomization(
-          title: transfer.customization.title,
-          color: transfer.customization.color,
-          worktree: worktreeID,
-          in: transfer.repositoryID
+        else {
+          // Transfers are minted from this same roster, so a miss means the
+          // id resolution (and any pin / customization) silently evaporated;
+          // make that visible.
+          repositoriesLogger.warning("No discovered worktree matches pending transfer \(transfer.worktreeName).")
+          continue
+        }
+        resolvedIDs.append(
+          (transfer.pendingID, .init(worktreeID: worktreeID, repositoryID: transfer.repositoryID))
         )
+        if transfer.pinned {
+          sidebar.pin(worktree: worktreeID, in: transfer.repositoryID)
+        }
+        if let customization = transfer.customization {
+          sidebar.mergeCustomization(
+            title: customization.title,
+            color: customization.color,
+            worktree: worktreeID,
+            in: transfer.repositoryID
+          )
+        }
       }
+    }
+    for resolved in resolvedIDs {
+      state.resolvedPendingWorktrees[resolved.pendingID] = resolved.resolved
     }
   }
 
@@ -4575,14 +5093,32 @@ struct RepositoriesFeature {
     animated: Bool
   ) -> ApplyRepositoriesResult {
     let repositoryIDs = Set(repositories.map(\.id))
-    let (filteredPendingWorktrees, customizationTransfers) =
-      prunedPendingWorktrees(state: state, repositories: repositories, repositoryIDs: repositoryIDs)
-    seedCustomizationForDiscoveredWorktree(
-      transfers: customizationTransfers,
+    // Pendings are local-only, so the roots-derived set is authoritative for
+    // "still configured" across transient load failures.
+    let configuredRepositoryIDs = Set(
+      roots.map { RepositoryID($0.standardizedFileURL.path(percentEncoded: false)) }
+    )
+    let (filteredPendingWorktrees, pendingTransfers) =
+      prunedPendingWorktrees(
+        state: state,
+        repositories: repositories,
+        repositoryIDs: repositoryIDs,
+        configuredRepositoryIDs: configuredRepositoryIDs
+      )
+    seedTransferForDiscoveredWorktree(
+      transfers: pendingTransfers,
       repositories: repositories,
       state: &state,
     )
     let availableWorktreeIDs = Set(repositories.flatMap { $0.worktrees.map(\.id) })
+    // Drop a resolution entry once its repository loads without the worktree
+    // or leaves the configuration; a still-configured root that transiently
+    // failed to load keeps its entries so a stale snapshot id isn't stranded.
+    state.resolvedPendingWorktrees = state.resolvedPendingWorktrees.filter { entry in
+      if availableWorktreeIDs.contains(entry.value.worktreeID) { return true }
+      guard configuredRepositoryIDs.contains(entry.value.repositoryID) else { return false }
+      return !repositoryIDs.contains(entry.value.repositoryID)
+    }
     let (filteredRemovingRepositoryIDs, filteredActiveRemovalBatches) =
       prunedRemovalTrackers(state: state, availableRepoIDs: repositoryIDs)
     let identifiedRepositories = IdentifiedArray(uniqueElements: repositories)
@@ -4722,9 +5258,45 @@ extension RepositoriesFeature.State {
     selection?.worktreeID
   }
 
-  var effectiveSidebarSelectedRows: [SidebarItemFeature.State] {
-    let selectedRows = orderedSidebarItems().filter { sidebarSelectedWorktreeIDs.contains($0.id) }
-    return selectedRows.isEmpty ? (selectedRow(for: selectedWorktreeID).map { [$0] } ?? []) : selectedRows
+  /// Builds the `sidebarSelectionSlice` cache. Reads `sidebarItems[id:]` per
+  /// selected row, so it belongs to the reducer: calling it from a view body
+  /// would observation-track every row's properties.
+  func computeSidebarSelectionSlice() -> SidebarSelectionSlice {
+    let rows = effectiveSidebarSelectedRows()
+    return SidebarSelectionSlice(
+      rows: rows,
+      archiveTargets:
+        rows
+        .filter { $0.lifecycle == .idle && !$0.isMainWorktree }
+        .map { RepositoriesFeature.ArchiveWorktreeTarget(worktreeID: $0.id, repositoryID: $0.repositoryID) },
+      deleteTargets:
+        rows
+        .filter { $0.lifecycle == .idle }
+        .map { RepositoriesFeature.DeleteWorktreeTarget(worktreeID: $0.id, repositoryID: $0.repositoryID) },
+      hasMixedKindSelection: rows.count > 1 && Set(rows.map(\.kind)).count > 1,
+      isAllFoldersBulk: rows.count > 1 && rows.allSatisfy(\.isFolder)
+    )
+  }
+
+  /// The multi-selection in sidebar order, falling back to the focused row.
+  private func effectiveSidebarSelectedRows() -> [SidebarContextRow] {
+    var rows: [SidebarContextRow] = []
+    var seen: Set<Worktree.ID> = []
+    for row in orderedSidebarItems() where sidebarSelectedWorktreeIDs.contains(row.id) {
+      rows.append(SidebarContextRow(row))
+      seen.insert(row.id)
+    }
+    // Archived rows sit outside the pinned / unpinned buckets the ordered walk
+    // covers, so a selected row that's back on screen for its delete script is
+    // only reachable through `selectedRow(for:)`.
+    if seen.count < sidebarSelectedWorktreeIDs.count {
+      for id in sidebarItems.ids where sidebarSelectedWorktreeIDs.contains(id) && !seen.contains(id) {
+        guard let row = selectedRow(for: id) else { continue }
+        rows.append(SidebarContextRow(row))
+      }
+    }
+    guard rows.isEmpty else { return rows }
+    return selectedRow(for: selectedWorktreeID).map { [SidebarContextRow($0)] } ?? []
   }
 
   var expandedRepositoryIDs: Set<Repository.ID> {
@@ -4865,7 +5437,13 @@ extension RepositoriesFeature.State {
     guard let repositoryID = repositoryID(containing: id) else {
       return false
     }
-    return sidebar.sections[repositoryID]?.buckets[.archived]?.items[id] != nil
+    return sidebar.isArchived(id, in: repositoryID)
+  }
+
+  /// Archived rows show no running-script dots, except while their delete script
+  /// runs (the row re-enters the sidebar to show that terminal).
+  func stripsArchivedRunningScripts(for id: Worktree.ID, lifecycle: SidebarItemFeature.State.Lifecycle) -> Bool {
+    isWorktreeArchived(id) && lifecycle != .deletingScript
   }
 
   func worktreesForInfoWatcher() -> [Worktree] {
@@ -5037,6 +5615,39 @@ extension RepositoriesFeature.State {
   func worktreeVocabulary(forWorktree id: Worktree.ID?) -> WorktreeVocabulary {
     guard let id, let repoID = repositoryID(containing: id) else { return .git }
     return worktreeVocabulary(forRepository: repoID)
+  }
+
+  /// Retarget a possibly-materialized pending id to its real worktree id so a
+  /// stale snapshot (open context menu, menu bar, CLI-held id) keeps working
+  /// across the pending → real swap.
+  func resolvedWorktreeID(for id: Worktree.ID) -> Worktree.ID {
+    resolvedPendingWorktrees[id]?.worktreeID ?? id
+  }
+
+  /// Answers for the repositories the disk pass has not reached yet, from what is already
+  /// in memory: the settings file's entry for that repository, then the default editor.
+  /// Only the repository's own `supacode.json` needs the disk, so that is all the effect
+  /// is left with, and no consumer has to invent an answer for a repository with no entry.
+  mutating func seedUnresolvedOpenActions() {
+    // With no installed set, the default editor normalizes away and every repository that
+    // overrides nothing folds to `preferredDefault([])`, a guess the sweep overwrites a
+    // moment later. The sweep is synchronous before the first frame, so this is empty
+    // only where nothing has resolved anything yet.
+    guard !installedOpenActions.isEmpty else { return }
+    let unresolved = repositories.filter { openActionByRepositoryID[$0.id] == nil }
+    guard !unresolved.isEmpty else { return }
+    @Shared(.settingsFile) var settingsFile
+    let defaultEditorID = settingsFile.global.defaultEditorID
+    for repository in unresolved {
+      // The settings file is keyed the way `RepositorySettingsKey` keys it, which is not
+      // `Repository.ID` (that one keeps its trailing slash, and remote keys are branded).
+      let key = RepositorySettingsKey(rootURL: repository.rootURL, host: repository.host)
+      openActionByRepositoryID[repository.id] = OpenWorktreeAction.fromSettingsID(
+        settingsFile.repositories[key.repositoryID]?.openActionID,
+        defaultEditorID: defaultEditorID,
+        installed: installedOpenActions
+      )
+    }
   }
 
   /// Selectability check (archived = no, pending = yes) used by the worktree-history
@@ -5371,6 +5982,10 @@ extension RepositoriesFeature.State {
     var worktrees = repository.worktrees
     worktrees.remove(id: worktreeID)
     repositories[index] = repository.withWorktrees(worktrees)
+    // Prune the MRU here so every removal path (delete, archive, failed cleanup)
+    // drops it. `Worktree.ID` is a reusable path, so a stale entry would re-rank
+    // a freshly created worktree at the same path as recently used.
+    worktreeMRU.removeAll { $0 == worktreeID }
     return true
   }
 
@@ -5451,11 +6066,13 @@ private nonisolated func blockingScriptExitMessage(_ exitCode: Int) -> String {
   }
 }
 
+// swiftlint:disable:next function_parameter_count
 private nonisolated func worktreeCreateCommand(
   baseDirectoryURL: URL,
   name: String,
   copyFiles: (ignored: Bool, untracked: Bool),
   baseRef: String,
+  upstream: WorktreeUpstreamPreference,
   directoryOverride: URL?
 ) -> String {
   let baseDir = baseDirectoryURL.path(percentEncoded: false)
@@ -5478,6 +6095,14 @@ private nonisolated func worktreeCreateCommand(
     parts.append("--verbose")
   }
   parts.append(name)
+  switch upstream {
+  case .automatic:
+    break
+  case .unset:
+    parts.append(contentsOf: ["&&", "git", "branch", "--unset-upstream", name])
+  case .branch(let ref):
+    parts.append(contentsOf: ["&&", "git", "branch", "--set-upstream-to", ref, name])
+  }
   return parts.map(shellQuote).joined(separator: " ")
 }
 
@@ -5584,14 +6209,6 @@ extension RepositoriesFeature.State {
       )
     )
   }
-
-  func reorderedUnpinnedWorktreeIDs(for worktreeID: Worktree.ID, in repository: Repository) -> [Worktree.ID] {
-    var ordered = orderedUnpinnedWorktreeIDs(in: repository)
-    guard let index = ordered.firstIndex(of: worktreeID) else { return ordered }
-    ordered.remove(at: index)
-    ordered.insert(worktreeID, at: 0)
-    return ordered
-  }
 }
 
 extension Dictionary where Key == Repository.ID, Value == RepositoriesFeature.PendingPullRequestRefresh {
@@ -5647,6 +6264,27 @@ extension RepositoriesFeature.State {
     sidebarSelectedWorktreeIDs = worktreeID.map { [$0] } ?? []
     if recordHistory {
       recordWorktreeHistoryTransition(from: previousID, to: worktreeID)
+    }
+    if let worktreeID {
+      recordWorktreeMRU(worktreeID: worktreeID)
+    }
+  }
+
+  /// Hoists the selected worktree to the head of `worktreeMRU`. Called from
+  /// every user-initiated worktree selection; selection-clearing (nil) paths are
+  /// no-ops so a "select nothing" transition can't poison the MRU head.
+  mutating func recordWorktreeMRU(worktreeID: Worktree.ID) {
+    // A pending creation's synthetic id is transient and never a real row, so
+    // recording it would leave a ghost that eventually evicts real worktrees.
+    guard !worktreeID.isPending else { return }
+    if let existingIndex = worktreeMRU.firstIndex(of: worktreeID) {
+      worktreeMRU.remove(at: existingIndex)
+    }
+    worktreeMRU.insert(worktreeID, at: 0)
+    // Cap for parity with the history stacks; the switcher only ever needs the
+    // recent head, so an unbounded session-long list buys nothing.
+    if worktreeMRU.count > worktreeHistoryStackLimit {
+      worktreeMRU.removeLast(worktreeMRU.count - worktreeHistoryStackLimit)
     }
   }
 
@@ -5749,6 +6387,13 @@ extension RepositoriesFeature.State {
     selection = nextSelectedWorktreeID.map(SidebarSelection.worktree)
     sidebarSelectedWorktreeIDs = nextSidebarSelectedWorktreeIDs
     recordWorktreeHistoryTransition(from: previousSelection, to: nextSelectedWorktreeID)
+    // Sidebar selection bypasses `setSingleWorktreeSelection`, so record the
+    // worktree MRU here too. Otherwise clicking a worktree (the dominant nav
+    // path) never updates `worktreeMRU`, and the ⌘P switcher can't put the
+    // worktree you actually had open at the top.
+    if let nextSelectedWorktreeID {
+      recordWorktreeMRU(worktreeID: nextSelectedWorktreeID)
+    }
     var effects: [Effect<RepositoriesFeature.Action>] = []
     if focusTerminal,
       let nextSelectedWorktreeID,
@@ -5852,33 +6497,16 @@ extension RepositoriesFeature.State {
       let isUnresolvedRemotePlaceholder = repository.host != nil && repository.worktrees.isEmpty
       let pruneAgainstRoster = pruneLivenessAgainstRoster && !isUnresolvedRemotePlaceholder
       var copy = section
-      var seenInCuratedBuckets: Set<Worktree.ID> = []
-      for (bucketID, bucket) in copy.buckets {
-        if bucketID == .archived { continue }
-        var prunedItems: OrderedDictionary<Worktree.ID, SidebarState.Item> = [:]
-        for (worktreeID, item) in bucket.items {
-          if let mainID, worktreeID == mainID { continue }
-          if pruneAgainstRoster, !worktreeIDs.contains(worktreeID) { continue }
-          prunedItems[worktreeID] = item
-          seenInCuratedBuckets.insert(worktreeID)
-        }
-        var prunedBucket = bucket
-        prunedBucket.items = prunedItems
-        copy.buckets[bucketID] = prunedBucket
-      }
-      var archivedIDs: Set<Worktree.ID> = []
-      if let archivedBucket = copy.buckets[.archived] {
-        archivedIDs = Set(archivedBucket.items.keys)
-      }
-      // Seed every live non-main worktree that isn't already curated. Mutation
-      // actions assume every live worktree has a bucket and skip fallback paths.
-      for worktree in repository.worktrees {
-        if let mainID, worktree.id == mainID { continue }
-        if seenInCuratedBuckets.contains(worktree.id) || archivedIDs.contains(worktree.id) { continue }
+      let mainCustomization = mainID.flatMap { Self.mainWorktreeCustomization(in: copy, mainID: $0) }
+      let seenInCuratedBuckets = Self.pruneCuratedBuckets(
+        in: &copy, mainID: mainID, liveWorktreeIDs: worktreeIDs, pruneAgainstRoster: pruneAgainstRoster)
+      if let mainID, let mainCustomization {
         var unpinned = copy.buckets[.unpinned] ?? .init()
-        unpinned.items[worktree.id] = .init()
+        unpinned.items[mainID] = mainCustomization
         copy.buckets[.unpinned] = unpinned
       }
+      Self.seedLiveWorktrees(
+        into: &copy, repository: repository, mainID: mainID, seenInCuratedBuckets: seenInCuratedBuckets)
       // Same carve-out: a disconnected remote's empty roster would otherwise drop
       // every stored branch-collapse prefix.
       if !isUnresolvedRemotePlaceholder {
@@ -5904,6 +6532,71 @@ extension RepositoriesFeature.State {
     // `sidebar.json` on every tick.
     guard rebuilt != sidebar.sections else { return }
     $sidebar.withLock { sidebar in sidebar.sections = rebuilt }
+  }
+
+  /// Prunes each curated bucket in place: drops the main worktree (it renders in
+  /// the main slot) and, when `pruneAgainstRoster`, any row no longer live.
+  /// Returns the worktree IDs kept, so the caller can skip re-seeding them.
+  private static func pruneCuratedBuckets(
+    in copy: inout SidebarState.Section,
+    mainID: Worktree.ID?,
+    liveWorktreeIDs: Set<Worktree.ID>,
+    pruneAgainstRoster: Bool
+  ) -> Set<Worktree.ID> {
+    var seen: Set<Worktree.ID> = []
+    for (bucketID, bucket) in copy.buckets {
+      if bucketID == .archived { continue }
+      var prunedItems: OrderedDictionary<Worktree.ID, SidebarState.Item> = [:]
+      for (worktreeID, item) in bucket.items {
+        if let mainID, worktreeID == mainID { continue }
+        if pruneAgainstRoster, !liveWorktreeIDs.contains(worktreeID) { continue }
+        prunedItems[worktreeID] = item
+        seen.insert(worktreeID)
+      }
+      var prunedBucket = bucket
+      prunedBucket.items = prunedItems
+      copy.buckets[bucketID] = prunedBucket
+    }
+    return seen
+  }
+
+  /// Seeds every live non-main worktree that isn't already curated or archived into
+  /// `.unpinned`. Mutation actions assume every live worktree has a bucket and skip
+  /// fallback paths.
+  private static func seedLiveWorktrees(
+    into copy: inout SidebarState.Section,
+    repository: Repository,
+    mainID: Worktree.ID?,
+    seenInCuratedBuckets: Set<Worktree.ID>
+  ) {
+    var archivedIDs: Set<Worktree.ID> = []
+    if let archivedBucket = copy.buckets[.archived] {
+      archivedIDs = Set(archivedBucket.items.keys)
+    }
+    for worktree in repository.worktrees {
+      if let mainID, worktree.id == mainID { continue }
+      if seenInCuratedBuckets.contains(worktree.id) || archivedIDs.contains(worktree.id) { continue }
+      var unpinned = copy.buckets[.unpinned] ?? .init()
+      unpinned.items[worktree.id] = .init()
+      copy.buckets[.unpinned] = unpinned
+    }
+  }
+
+  /// Returns a git main worktree's CLI-set appearance override, if any.
+  /// Reconciliation reprojects it into `.unpinned` so the tint / rename survives
+  /// roster reloads without making the main worktree user-pinned.
+  private static func mainWorktreeCustomization(
+    in section: SidebarState.Section,
+    mainID: Worktree.ID
+  ) -> SidebarState.Item? {
+    for bucketID in [SidebarState.BucketID.unpinned, .pinned] {
+      guard var item = section.buckets[bucketID]?.items[mainID],
+        item.title != nil || item.color != nil
+      else { continue }
+      item.archivedAt = nil
+      return item
+    }
+    return nil
   }
 
   /// Drop persisted `collapsedBranchPrefixes` entries no longer covered by any

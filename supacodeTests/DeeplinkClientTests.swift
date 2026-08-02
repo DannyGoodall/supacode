@@ -24,6 +24,55 @@ struct DeeplinkClientTests {
     #expect(parse(url) == nil)
   }
 
+  // MARK: - Background opt-out.
+
+  @Test func backgroundQueryItemSuppressesFocus() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/delete?background=true")!
+    #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .delete, background: true))
+  }
+
+  @Test func backgroundDefaultsToFocusingWhenAbsent() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/delete")!
+    #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .delete, background: false))
+  }
+
+  /// Only a literal `true` suppresses focus, so a typo can't silently stop
+  /// focusing the way an `!= "false"` reading would.
+  @Test(arguments: ["background=banana", "background", "background=", "background=false", "background=TRUE"])
+  func malformedBackgroundValueStillFocuses(_ query: String) {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/delete?\(query)")!
+    #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .delete, background: false))
+  }
+
+  @Test func backgroundAppliesToTabNewAlongsideItsOwnParams() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/tab/new?input=ls&background=true")!
+    #expect(
+      parse(url)
+        == .worktree(id: "/tmp/repo/wt-1", action: .tabNew(input: "ls", id: nil, title: nil), background: true)
+    )
+  }
+
+  @Test func backgroundAppliesToRepoWorktreeNew() {
+    let encoded = "%2Ftmp%2Frepo"
+    let url = URL(string: "supacode://repo/\(encoded)/worktree/new?branch=feat&background=true")!
+    #expect(
+      parse(url)
+        == .repoWorktreeNew(
+          repositoryID: "/tmp/repo",
+          branch: "feat",
+          baseRef: nil,
+          fetchOrigin: false,
+          worktreeName: nil,
+          worktreePath: nil,
+          background: true
+        )
+    )
+  }
+
   // MARK: - Worktree actions.
 
   @Test func worktreeRun() {
@@ -60,6 +109,50 @@ struct DeeplinkClientTests {
     let encoded = "%2Ftmp%2Frepo%2Fwt-1"
     let url = URL(string: "supacode://worktree/\(encoded)/unpin")!
     #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .unpin))
+  }
+
+  @Test func worktreeAppearanceTitleAndColor() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/appearance?title=Custom&color=red")!
+    #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .appearance(title: "Custom", color: "red")))
+  }
+
+  @Test func worktreeAppearancePercentEncodedValues() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/appearance?title=Hello%20World&color=%23A1B2C3")!
+    #expect(
+      parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .appearance(title: "Hello World", color: "#A1B2C3"))
+    )
+  }
+
+  @Test func worktreeAppearanceColorOnly() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/appearance?color=none")!
+    #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .appearance(title: nil, color: "none")))
+  }
+
+  @Test func worktreeAppearanceEmptyTitleIsPreservedForClearing() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/appearance?title=")!
+    #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .appearance(title: "", color: nil)))
+  }
+
+  @Test func worktreeAppearanceMissingQueryReturnsNil() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/appearance")!
+    #expect(parse(url) == nil)
+  }
+
+  @Test func worktreeAppearanceEmptyColorIsPreservedForValidation() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/appearance?color=")!
+    #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .appearance(title: nil, color: "")))
+  }
+
+  @Test func worktreeAppearanceIDWithTrailingSlashIsNormalized() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1%2F"
+    let url = URL(string: "supacode://worktree/\(encoded)/appearance?color=red")!
+    #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .appearance(title: nil, color: "red")))
   }
 
   @Test func worktreeMissingActionDefaultsToSelect() {
@@ -105,6 +198,55 @@ struct DeeplinkClientTests {
     let encoded = "%2Ftmp%2Frepo%2Fwt-1"
     let url = URL(string: "supacode://worktree/\(encoded)/tab/new?input=echo%20hello")!
     #expect(parse(url) == .worktree(id: "/tmp/repo/wt-1", action: .tabNew(input: "echo hello", id: nil)))
+  }
+
+  @Test func worktreeTabNewWithTitle() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let url = URL(string: "supacode://worktree/\(encoded)/tab/new?title=implement%20work")!
+    #expect(
+      parse(url)
+        == .worktree(
+          id: "/tmp/repo/wt-1",
+          action: .tabNew(input: nil, id: nil, title: "implement work")
+        )
+    )
+  }
+
+  @Test func worktreeTabRename() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let tabUUID = UUID(uuidString: "550E8400-E29B-41D4-A716-446655440000")!
+    let url = URL(string: "supacode://worktree/\(encoded)/tab/\(tabUUID.uuidString)/rename?title=review")!
+    #expect(
+      parse(url)
+        == .worktree(id: "/tmp/repo/wt-1", action: .tabRename(tabID: tabUUID, title: "review"))
+    )
+  }
+
+  @Test func worktreeTabRenameWithEmptyTitle() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let tabUUID = UUID(uuidString: "550E8400-E29B-41D4-A716-446655440000")!
+    let url = URL(string: "supacode://worktree/\(encoded)/tab/\(tabUUID.uuidString)/rename?title=")!
+    #expect(
+      parse(url)
+        == .worktree(id: "/tmp/repo/wt-1", action: .tabRename(tabID: tabUUID, title: ""))
+    )
+  }
+
+  @Test func worktreeTabRenameWithValuelessTitle() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let tabUUID = UUID(uuidString: "550E8400-E29B-41D4-A716-446655440000")!
+    let url = URL(string: "supacode://worktree/\(encoded)/tab/\(tabUUID.uuidString)/rename?title")!
+    #expect(
+      parse(url)
+        == .worktree(id: "/tmp/repo/wt-1", action: .tabRename(tabID: tabUUID, title: ""))
+    )
+  }
+
+  @Test func worktreeTabRenameWithoutTitleReturnsNil() {
+    let encoded = "%2Ftmp%2Frepo%2Fwt-1"
+    let tabUUID = UUID(uuidString: "550E8400-E29B-41D4-A716-446655440000")!
+    let url = URL(string: "supacode://worktree/\(encoded)/tab/\(tabUUID.uuidString)/rename")!
+    #expect(parse(url) == nil)
   }
 
   @Test func worktreeTabDestroy() {
@@ -246,6 +388,63 @@ struct DeeplinkClientTests {
           fetchOrigin: false,
           worktreeName: "feature_foo",
           worktreePath: "~/Repos"
+        )
+    )
+  }
+
+  @Test func repoWorktreeNewWithPin() {
+    let repoEncoded = "%2Ftmp%2Frepo"
+    let url = URL(
+      string: "supacode://repo/\(repoEncoded)/worktree/new?branch=feature-x&pin=true"
+    )!
+    #expect(
+      parse(url)
+        == .repoWorktreeNew(
+          repositoryID: "/tmp/repo",
+          branch: "feature-x",
+          baseRef: nil,
+          fetchOrigin: false,
+          worktreeName: nil,
+          worktreePath: nil,
+          pin: true
+        )
+    )
+  }
+
+  @Test func repoWorktreeNewWithUpstream() {
+    let repoEncoded = "%2Ftmp%2Frepo"
+    let url = URL(
+      string: "supacode://repo/\(repoEncoded)/worktree/new?branch=feature-x&upstream=origin%2Ffeature-x"
+    )!
+    #expect(
+      parse(url)
+        == .repoWorktreeNew(
+          repositoryID: "/tmp/repo",
+          branch: "feature-x",
+          baseRef: nil,
+          upstream: "origin/feature-x",
+          fetchOrigin: false,
+          worktreeName: nil,
+          worktreePath: nil
+        )
+    )
+  }
+
+  @Test func repoWorktreeNewKeepsEmptyUpstreamDistinctFromOmitted() {
+    let repoEncoded = "%2Ftmp%2Frepo"
+    let url = URL(
+      string: "supacode://repo/\(repoEncoded)/worktree/new?branch=feature-x&upstream="
+    )!
+    #expect(
+      parse(url)
+        == .repoWorktreeNew(
+          repositoryID: "/tmp/repo",
+          branch: "feature-x",
+          baseRef: nil,
+          upstream: "",
+          fetchOrigin: false,
+          worktreeName: nil,
+          worktreePath: nil
         )
     )
   }

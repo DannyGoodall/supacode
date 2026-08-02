@@ -30,6 +30,7 @@ struct SettingsFeatureTests {
       promptForWorktreeCreation: true,
       terminalThemeSyncEnabled: false,
       automatedActionPolicy: .always,
+      confirmCloseSurface: false,
     )
     @Shared(.settingsFile) var settingsFile
     $settingsFile.withLock { $0.global = loaded }
@@ -60,6 +61,7 @@ struct SettingsFeatureTests {
       $0.fetchOriginBeforeWorktreeCreation = true
       $0.terminalThemeSyncEnabled = false
       $0.automatedActionPolicy = .always
+      $0.confirmCloseSurface = false
     }
     await store.skipReceivedActions()
     receiveStartupHookChecks(from: store)
@@ -113,6 +115,38 @@ struct SettingsFeatureTests {
     expectNoDifference(settingsFile.global, expectedSettings)
   }
 
+  @Test(.dependencies) func togglingTerminalHibernationPersistsChanges() async {
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global = .default }
+
+    let store = TestStore(initialState: SettingsFeature.State()) {
+      SettingsFeature()
+    }
+
+    await store.send(.binding(.set(\.terminalHibernationEnabled, false))) {
+      $0.terminalHibernationEnabled = false
+    }
+    await store.receive(\.delegate.settingsChanged)
+    #expect(settingsFile.global.terminalHibernationEnabled == false)
+  }
+
+  @Test(.dependencies) func confirmCloseSurfacePersistsChanges() async {
+    var initialSettings = GlobalSettings.default
+    initialSettings.confirmCloseSurface = true
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global = initialSettings }
+
+    let store = TestStore(initialState: SettingsFeature.State(settings: initialSettings)) {
+      SettingsFeature()
+    }
+
+    await store.send(.binding(.set(\.confirmCloseSurface, false))) {
+      $0.confirmCloseSurface = false
+    }
+    await store.receive(\.delegate.settingsChanged)
+    #expect(!settingsFile.global.confirmCloseSurface)
+  }
+
   @Test(.dependencies) func setSystemNotificationsEnabledPersistsChanges() async {
     var initialSettings = GlobalSettings.default
     initialSettings.systemNotificationsEnabled = false
@@ -128,6 +162,43 @@ struct SettingsFeatureTests {
     }
     await store.receive(\.delegate.settingsChanged)
     #expect(settingsFile.global.systemNotificationsEnabled == true)
+  }
+
+  @Test(.dependencies) func settingAppVisibilityPersistsChanges() async {
+    var initialSettings = GlobalSettings.default
+    initialSettings.appVisibility = .dockAndMenuBar
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global = initialSettings }
+
+    let store = TestStore(initialState: SettingsFeature.State(settings: initialSettings)) {
+      SettingsFeature()
+    }
+
+    await store.send(.setAppVisibility(.menuBar)) {
+      $0.appVisibility = .menuBar
+    }
+    await store.receive(\.delegate.settingsChanged)
+    #expect(settingsFile.global.appVisibility == .menuBar)
+  }
+
+  @Test(.dependencies) func setAppVisibilityPersistsOnlyRealFlips() async {
+    var initialSettings = GlobalSettings.default
+    initialSettings.appVisibility = .dockAndMenuBar
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global = initialSettings }
+
+    let store = TestStore(initialState: SettingsFeature.State(settings: initialSettings)) {
+      SettingsFeature()
+    }
+
+    // Echo of the current value (MenuBarExtra scene evaluation) is a no-op.
+    await store.send(.setAppVisibility(.dockAndMenuBar))
+
+    await store.send(.setAppVisibility(.dock)) {
+      $0.appVisibility = .dock
+    }
+    await store.receive(\.delegate.settingsChanged)
+    #expect(settingsFile.global.appVisibility == .dock)
   }
 
   @Test(.dependencies) func selectingNotificationSoundPlaysPreview() async {

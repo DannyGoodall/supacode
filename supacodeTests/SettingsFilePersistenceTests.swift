@@ -172,7 +172,8 @@ struct SettingsFilePersistenceTests {
     // Missing key (pre-feature file) decodes to the default sound.
     #expect(settings.global.notificationSound == .hero)
     #expect(settings.global.systemNotificationsEnabled == false)
-    #expect(settings.global.moveNotifiedWorktreeToTop == true)
+    // Missing key (pre-feature file) decodes to the default, now false.
+    #expect(settings.global.moveNotifiedWorktreeToTop == false)
     #expect(settings.global.analyticsEnabled == true)
     #expect(settings.global.crashReportsEnabled == true)
     #expect(settings.global.githubIntegrationEnabled == true)
@@ -386,6 +387,48 @@ struct SettingsFilePersistenceTests {
     #expect(reloaded.global.terminalThemeSyncEnabled == true)
   }
 
+  @Test(.dependencies) func decodesMissingConfirmCloseSurfaceAsTrue() throws {
+    let legacy = LegacySettingsFile(
+      global: LegacyGlobalSettings(
+        appearanceMode: .dark,
+        updatesAutomaticallyCheckForUpdates: false,
+        updatesAutomaticallyDownloadUpdates: true
+      ),
+      repositories: [:]
+    )
+    let data = try JSONEncoder().encode(legacy)
+    let storage = MutableTestStorage(initialData: data)
+
+    let settings: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      return settings
+    }
+
+    #expect(settings.global.confirmCloseSurface)
+  }
+
+  @Test(.dependencies) func roundTripsExplicitConfirmCloseSurfaceDisabled() throws {
+    let storage = SettingsTestStorage()
+
+    withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      $settings.withLock { $0.global.confirmCloseSurface = false }
+    }
+
+    let reloaded: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var reloaded: SettingsFile
+      return reloaded
+    }
+
+    #expect(!reloaded.global.confirmCloseSurface)
+  }
+
   @Test(.dependencies) func decodesMissingRemoteSessionPersistenceEnabledAsTrue() throws {
     let legacy = LegacySettingsFile(
       global: LegacyGlobalSettings(
@@ -409,6 +452,120 @@ struct SettingsFilePersistenceTests {
     #expect(settings.global.remoteSessionPersistenceEnabled == true)
   }
 
+  @Test(.dependencies) func decodesMissingTerminalHibernationEnabledAsTrue() throws {
+    let legacy = LegacySettingsFile(
+      global: LegacyGlobalSettings(
+        appearanceMode: .dark,
+        updatesAutomaticallyCheckForUpdates: false,
+        updatesAutomaticallyDownloadUpdates: true
+      ),
+      repositories: [:]
+    )
+    let data = try JSONEncoder().encode(legacy)
+    let storage = MutableTestStorage(initialData: data)
+
+    let settings: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      return settings
+    }
+
+    // The Beta feature defaults on, so a pre-feature file decodes to on.
+    #expect(settings.global.terminalHibernationEnabled == true)
+  }
+
+  @Test(.dependencies) func decodesMissingAppVisibilityAsDefault() throws {
+    // A file predating the menu bar feature falls through to the default, which
+    // now shows the menu bar too.
+    let legacy = LegacySettingsFile(
+      global: LegacyGlobalSettings(
+        appearanceMode: .dark,
+        updatesAutomaticallyCheckForUpdates: false,
+        updatesAutomaticallyDownloadUpdates: true
+      ),
+      repositories: [:]
+    )
+    let data = try JSONEncoder().encode(legacy)
+    let storage = MutableTestStorage(initialData: data)
+
+    let settings: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      return settings
+    }
+
+    #expect(settings.global.appVisibility == .dockAndMenuBar)
+  }
+
+  @Test(.dependencies) func decodesUnrecognizedAppVisibilityAsDefaultWithoutDiscardingTheFile() throws {
+    // A throw here would reset the whole file to defaults and write it back, so
+    // a hand-edited or newer-than-us value must fall through to the default.
+    let file = SettingsFileWithRawAppVisibility(
+      global: GlobalSettingsWithRawAppVisibility(
+        appearanceMode: .light,
+        updatesAutomaticallyCheckForUpdates: false,
+        updatesAutomaticallyDownloadUpdates: false,
+        appVisibility: "bogus"
+      ),
+      repositories: [:]
+    )
+    let data = try JSONEncoder().encode(file)
+    let storage = MutableTestStorage(initialData: data)
+
+    let settings: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      return settings
+    }
+
+    #expect(settings.global.appVisibility == .dockAndMenuBar)
+    // Both differ from `GlobalSettings.default`, so a reset-to-defaults would fail here.
+    #expect(settings.global.appearanceMode == .light)
+    #expect(settings.global.updatesAutomaticallyCheckForUpdates == false)
+  }
+
+  @Test(.dependencies) func decodesMistypedAppVisibilityAsDefaultWithoutDiscardingTheFile() throws {
+    // A hand-edit can produce the wrong JSON type, not just an unknown string.
+    let json = """
+      {"global":{"appearanceMode":"light","updatesAutomaticallyCheckForUpdates":false,\
+      "updatesAutomaticallyDownloadUpdates":false,"appVisibility":3},"repositories":{}}
+      """
+    let storage = MutableTestStorage(initialData: Data(json.utf8))
+
+    let settings: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      return settings
+    }
+
+    #expect(settings.global.appVisibility == .dockAndMenuBar)
+    #expect(settings.global.appearanceMode == .light)
+  }
+
+  @Test(.dependencies) func roundTripsExplicitAppVisibility() throws {
+    let storage = SettingsTestStorage()
+
+    withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      $settings.withLock { $0.global.appVisibility = .menuBar }
+    }
+
+    let reloaded: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var reloaded: SettingsFile
+      return reloaded
+    }
+
+    #expect(reloaded.global.appVisibility == .menuBar)
+  }
+
   @Test(.dependencies) func roundTripsExplicitRemoteSessionPersistenceDisabled() throws {
     let storage = SettingsTestStorage()
 
@@ -427,6 +584,71 @@ struct SettingsFilePersistenceTests {
     }
 
     #expect(reloaded.global.remoteSessionPersistenceEnabled == false)
+  }
+
+  @Test(.dependencies) func decodesMissingNotificationRetentionLimitAsDefault() throws {
+    let legacy = LegacySettingsFile(
+      global: LegacyGlobalSettings(
+        appearanceMode: .dark,
+        updatesAutomaticallyCheckForUpdates: false,
+        updatesAutomaticallyDownloadUpdates: true
+      ),
+      repositories: [:]
+    )
+    let data = try JSONEncoder().encode(legacy)
+    let storage = MutableTestStorage(initialData: data)
+
+    let settings: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      return settings
+    }
+
+    #expect(settings.global.notificationRetentionLimit == .twoHundred)
+  }
+
+  @Test(.dependencies) func decodesUnrecognizedNotificationRetentionLimitAsDefault() throws {
+    // A hand-edited file carrying a count that is not one of the offered tiers.
+    var global = GlobalSettings.default
+    global.systemNotificationsEnabled = true
+
+    let encoded = try JSONEncoder().encode(global)
+    var globalDict = try #require(try JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+    globalDict["notificationRetentionLimit"] = 150
+    let data = try JSONSerialization.data(withJSONObject: ["global": globalDict, "repositories": [:]])
+    let storage = MutableTestStorage(initialData: data)
+
+    let settings: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      return settings
+    }
+
+    // The out-of-range value falls back to the default without resetting siblings.
+    #expect(settings.global.notificationRetentionLimit == .twoHundred)
+    #expect(settings.global.systemNotificationsEnabled == true)
+  }
+
+  @Test(.dependencies) func roundTripsExplicitNotificationRetentionLimit() throws {
+    let storage = SettingsTestStorage()
+
+    withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var settings: SettingsFile
+      $settings.withLock { $0.global.notificationRetentionLimit = .oneThousand }
+    }
+
+    let reloaded: SettingsFile = withDependencies {
+      $0.settingsFileStorage = storage.storage
+    } operation: {
+      @Shared(.settingsFile) var reloaded: SettingsFile
+      return reloaded
+    }
+
+    #expect(reloaded.global.notificationRetentionLimit == .oneThousand)
   }
 }
 
@@ -507,4 +729,16 @@ private struct LegacyGlobalSettingsWithQuitToggle: Codable {
   var updatesAutomaticallyCheckForUpdates: Bool
   var updatesAutomaticallyDownloadUpdates: Bool
   var confirmBeforeQuit: Bool
+}
+
+private struct SettingsFileWithRawAppVisibility: Codable {
+  var global: GlobalSettingsWithRawAppVisibility
+  var repositories: [String: RepositorySettings]
+}
+
+private struct GlobalSettingsWithRawAppVisibility: Codable {
+  var appearanceMode: AppearanceMode
+  var updatesAutomaticallyCheckForUpdates: Bool
+  var updatesAutomaticallyDownloadUpdates: Bool
+  var appVisibility: String
 }

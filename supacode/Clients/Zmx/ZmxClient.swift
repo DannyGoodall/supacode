@@ -205,7 +205,10 @@ extension ZmxClient {
       // Uses `bundledExecutable`, not the budget-gated `resolveExecutable`, so
       // kill paths still tear down sessions from a previous under-budget launch
       // even when this launch's `ZMX_DIR` is over budget.
-      guard let executable = bundledExecutable() else { return nil }
+      guard let executable = bundledExecutable() else {
+        zmxLogger.debug("zmx unbundled: skipping `zmx \(arguments.joined(separator: " "))`")
+        return nil
+      }
       // Pin `ZMX_DIR` so the subprocess resolves the same socket dir as the
       // wrapped shell. Defense-in-depth against future env divergence even
       // after the separator fix in `socketDir`.
@@ -251,6 +254,25 @@ extension ZmxClient {
     killRemoteSession: { _, _ in },
     listSessionsWithClients: { [] }
   )
+}
+
+extension ZmxClient {
+  /// Tears down one surface's sessions host-first, then local: the remote kill's
+  /// SSH reuses the ControlMaster held open by the local zmx session, so killing
+  /// local first would strand the host session. Skips either side when unset.
+  /// Under cancellation the local kill is skipped instead of spawning a child
+  /// that would be terminated on arrival; the caller owns any retry.
+  func killSurfaceSessions(sessionID: String, remoteHost: RemoteHost?, killLocal: Bool) async {
+    if let remoteHost {
+      await killRemoteSession(remoteHost, sessionID)
+    }
+    guard killLocal else { return }
+    guard !Task.isCancelled else {
+      zmxLogger.debug("Cancelled before local kill of \(sessionID); caller owns the retry")
+      return
+    }
+    await killSession(sessionID)
+  }
 }
 
 extension ZmxClient: DependencyKey {
@@ -479,6 +501,11 @@ nonisolated enum ZmxAttach {
   /// reconnect loop (ssh lines included) is single-quoted by `buildCommand`
   /// for the local zmx-wrapping `/bin/sh -c`; the ssh lines' inner quoting
   /// survives that outer level.
+  ///
+  /// Ghostty runs a surface command as `bash -c "exec -l <command>"`, so it
+  /// must lead with an executable. The zmx form leads with the zmx path; the
+  /// bare loop leads with a `trap` builtin `exec` can't run (#737), so wrap it
+  /// in `/bin/sh -c` (no leading `exec`, which would break the same way).
   static func buildRemoteCommand(
     _ launch: RemoteSurfaceLaunch,
     localZmxExecutablePath: String?
@@ -492,7 +519,7 @@ nonisolated enum ZmxAttach {
       remoteCommand: posixShellWrapped(remoteReconnectScript(launch))
     )
     let loop = SSHReconnectLoop.script(connect: connectLine, reconnect: reconnectLine)
-    guard let localZmxExecutablePath else { return loop }
+    guard let localZmxExecutablePath else { return "/bin/sh -c " + shellQuote(loop) }
     // The local and host-side sessions share the `supa-<surfaceID>` name.
     return buildCommand(
       executablePath: localZmxExecutablePath,
@@ -545,6 +572,7 @@ nonisolated enum ZmxAttach {
     // `command`: attach can fail AFTER the session started running it, and a
     // second concurrent copy of a one-shot command must never spawn.
     return launch.export
+      + brewPathPrefix
       + "if command -v zmx >/dev/null 2>&1; then "
       + "zmx attach \(launch.sessionID) \(sessionCommand)\n"
       + "supa_rc=$?\n"
@@ -572,6 +600,7 @@ nonisolated enum ZmxAttach {
       return launch.export + reconnectShellNotice + loginShellRun(launch.reconnectFallbackCommand)
     }
     return launch.export
+      + brewPathPrefix
       + "if command -v zmx >/dev/null 2>&1; then "
       + "if zmx list --short 2>/dev/null | grep -q '\(launch.sessionID)$'; then "
       + "exec zmx attach \(launch.sessionID)\n"
@@ -601,13 +630,21 @@ nonisolated enum ZmxAttach {
       // `runProcess` logs.
       arguments: [
         "-c",
-        "command -v zmx >/dev/null 2>&1 || exit 0; zmx kill \(sessionID); "
+        brewPathPrefix
+          + "command -v zmx >/dev/null 2>&1 || exit 0; zmx kill \(sessionID); "
           + "! zmx list --short 2>/dev/null | grep -q '\(sessionID)$'",
       ],
       workingDirectory: nil,
       extraOptions: SSHCommand.backgroundProbeOptions
     )
   }
+
+  /// Appends the well-known tool directories to `PATH` before every `zmx`
+  /// lookup and invocation, so a brew-installed `zmx` that a non-interactive
+  /// login shell misses (#671) still resolves. Prepending the export before
+  /// `zmx attach` also lets the persisted session inherit the augmented `PATH`.
+  /// See `WellKnownToolDirectories`.
+  static var brewPathPrefix: String { WellKnownToolDirectories.pathExportPrefix }
 
   /// OSC 8 hyperlink to the zmx site (terminals without OSC 8 support just
   /// render the plain "zmx" text).

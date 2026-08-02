@@ -18,6 +18,15 @@ nonisolated enum DeeplinkURLBuilder {
     "supacode://worktree/\(worktreeID)/\(action)"
   }
 
+  static func worktreeAppearance(worktreeID: String, title: String?, color: String?) -> String {
+    var url = "supacode://worktree/\(worktreeID)/appearance"
+    var params: [String] = []
+    if let title { params.append("title=\(percentEncodeQueryValue(title))") }
+    if let color { params.append("color=\(percentEncodeQueryValue(color))") }
+    if !params.isEmpty { url += "?\(params.joined(separator: "&"))" }
+    return url
+  }
+
   // MARK: - Script.
 
   static func scriptRun(worktreeID: String, scriptID: String) -> String {
@@ -34,13 +43,18 @@ nonisolated enum DeeplinkURLBuilder {
     "supacode://worktree/\(worktreeID)/tab/\(tabID)"
   }
 
-  static func tabNew(worktreeID: String, input: String?, id: String?) -> String {
+  static func tabNew(worktreeID: String, input: String?, id: String?, title: String?) -> String {
     var url = "supacode://worktree/\(worktreeID)/tab/new"
     var params: [String] = []
     if let input { params.append("input=\(percentEncodeQueryValue(input))") }
     if let id { params.append("id=\(id)") }
+    if let title { params.append("title=\(percentEncodeQueryValue(title))") }
     if !params.isEmpty { url += "?\(params.joined(separator: "&"))" }
     return url
+  }
+
+  static func tabRename(worktreeID: String, tabID: String, title: String) -> String {
+    "supacode://worktree/\(worktreeID)/tab/\(tabID)/rename?title=\(percentEncodeQueryValue(title))"
   }
 
   static func tabClose(worktreeID: String, tabID: String) -> String {
@@ -89,9 +103,13 @@ nonisolated enum DeeplinkURLBuilder {
   struct WorktreeNewOptions {
     var branch: String?
     var base: String?
+    /// Upstream branch for the new branch; empty means "no upstream", `nil`
+    /// leaves tracking to Git.
+    var upstream: String?
     var fetch: Bool
     var name: String?
     var location: String?
+    var pin = false
   }
 
   static func repoWorktreeNew(repoID: String, options: WorktreeNewOptions) -> String {
@@ -99,9 +117,11 @@ nonisolated enum DeeplinkURLBuilder {
     var params: [String] = []
     if let branch = options.branch { params.append("branch=\(percentEncodeQueryValue(branch))") }
     if let base = options.base { params.append("base=\(percentEncodeQueryValue(base))") }
+    if let upstream = options.upstream { params.append("upstream=\(percentEncodeQueryValue(upstream))") }
     if options.fetch { params.append("fetch=true") }
     if let name = options.name { params.append("name=\(percentEncodeQueryValue(name))") }
     if let location = options.location { params.append("location=\(percentEncodeQueryValue(location))") }
+    if options.pin { params.append("pin=true") }
     if !params.isEmpty { url += "?\(params.joined(separator: "&"))" }
     return url
   }

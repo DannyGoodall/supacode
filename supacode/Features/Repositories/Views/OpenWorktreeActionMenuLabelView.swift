@@ -14,35 +14,23 @@ struct OpenWorktreeActionMenuLabelView: View {
   }
 }
 
-/// The icon for an open action (resolved app icon or SF Symbol).
+/// The icon for an open action (a baked app icon or an SF Symbol). The store is
+/// read, never asked to resolve: an unwarmed action renders no icon rather than
+/// blocking the menu build on IconServices.
 struct OpenWorktreeActionIcon: View {
   let action: OpenWorktreeAction
-
-  private func resizedIcon(_ image: NSImage, size: CGSize) -> NSImage {
-    let newImage = NSImage(size: size)
-    newImage.lockFocus()
-    image.draw(
-      in: NSRect(origin: .zero, size: size),
-      from: NSRect(origin: .zero, size: image.size),
-      operation: .sourceOver,
-      fraction: 1.0
-    )
-    newImage.unlockFocus()
-    return newImage
-  }
+  @Environment(OpenActionIconStore.self) private var iconStore: OpenActionIconStore?
 
   var body: some View {
-    if let icon = action.menuIcon {
-      switch icon {
-      case .app(let image):
-        Image(nsImage: resizedIcon(image, size: CGSize(width: 16, height: 16)))
-          .renderingMode(.original)
-          .accessibilityHidden(true)
-      case .symbol(let name):
-        Image(systemName: name)
-          .foregroundStyle(.primary)
-          .accessibilityHidden(true)
-      }
+    if let symbolName = action.menuSymbolName {
+      // Stays a live symbol so it keeps tracking light / dark.
+      Image(systemName: symbolName)
+        .foregroundStyle(.primary)
+        .accessibilityHidden(true)
+    } else if let icon = iconStore?.icon(for: action) {
+      Image(nsImage: icon)
+        .renderingMode(.original)
+        .accessibilityHidden(true)
     }
   }
 }

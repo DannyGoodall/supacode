@@ -189,14 +189,13 @@ public nonisolated enum AgentPresenceOSC {
     "\(eventField)=\(event.rawValue)\(pidSuffix)"
   }
 
-  /// Shell that resolves `$__tty` to a writable terminal device for the OSC emits.
-  /// Agents run hooks without a controlling terminal (`/dev/tty` open fails), so
-  /// the hook recovers the terminal its parent agent is attached to via
-  /// `ps -o tty=`. `ps` reports a bare name (`ttys039` on macOS, `pts/5` on
-  /// Linux), so a `/dev/` prefix is added; a parent with no tty (`??`) falls back
-  /// to `/dev/tty` for the rare context that does have a controlling terminal.
+  /// Shell that resolves `$__ppid` (the hook's parent agent) and its `$__tty`, since
+  /// hooks run with no controlling terminal and `ps` reports a bare tty name (`??`
+  /// falls back to `/dev/tty`). Parent pid comes from `ps`, not the shell special
+  /// `$PPID`, which Grok preflights as a required env var and then skips the hook.
   static let ttyResolveSnippet =
-    #"__tty=$(ps -o tty= -p "$PPID" 2>/dev/null | tr -d '[:space:]'); "#
+    #"__ppid=$(ps -o ppid= -p $$ 2>/dev/null | tr -d '[:space:]'); "#
+    + #"__tty=$(ps -o tty= -p "$__ppid" 2>/dev/null | tr -d '[:space:]'); "#
     + #"case "$__tty" in *[0-9]*) __tty="/dev/${__tty#/dev/}";; *) __tty="/dev/tty";; esac"#
 
   /// Shell `printf` that emits the OSC 3008 presence sequence for `event`. Written
@@ -205,21 +204,36 @@ public nonisolated enum AgentPresenceOSC {
   /// stdout. The caller guards emission on `SUPACODE_SURFACE_ID` and runs
   /// `ttyResolveSnippet` first.
   ///
-  /// The pid suffix is gated on `SUPACODE_SOCKET_PATH` (set only on the local
-  /// host) so a local hook carries `$PPID` and a remote one omits it; a forged
-  /// positive pid at worst pins a live-looking badge until surface close. The
-  /// suffix is built in shell and filled into a trailing `%s`, empty when remote.
+  /// The pid suffix is gated on `SUPACODE_SOCKET_PATH` (set only on the local host)
+  /// and on `$__ppid` having resolved, so a remote hook or a failed `ps` leaves the
+  /// field off the wire instead of sending a dangling `pid=`. Both shapes parse to
+  /// `pid: nil` today, so this is wire hygiene, not a behavior fix: a local agent
+  /// with no resolvable parent stays untracked by the liveness sweep either way. A
+  /// forged positive pid at worst pins a live-looking badge until surface close. The
+  /// suffix is built in shell and filled into a trailing `%s`.
   static func emitShell(event: HookEvent, agent: SkillAgent) -> String {
     // Trailing %s for the shell-built, conditionally-empty pid suffix.
     let meta = metadata(event: event, pidSuffix: "%s")
     let payload = #"\033]3008;\#(action(for: event))=\#(agent.rawValue);\#(meta)\033\\"#
-    return #"__sp=""; [ -n "${SUPACODE_SOCKET_PATH:-}" ] && __sp=";\#(pidField)=$PPID"; "#
+    return #"__sp=""; [ -n "${SUPACODE_SOCKET_PATH:-}" ] && [ -n "$__ppid" ] "#
+      + #"&& __sp=";\#(pidField)=$__ppid"; "#
       + #"printf '\#(payload)' "$__sp" > "$__tty""#
   }
 
   /// The `key=value` metadata a notify signal carries; `title` / `body` are base64.
   static func notifyMetadata(title: String, body: String) -> String {
     "\(kindField)=\(notifyKind);\(titleField)=\(title);\(bodyField)=\(body)"
+  }
+
+  /// Notify OSC whose `title` / `body` are base64-encoded when the command is
+  /// composed, so the hook needs no runtime `base64` / `awk`. Standard base64
+  /// carries no `;` or `%`, so it is framing- and `printf`-safe with no format args.
+  static func emitFixedNotifyShell(agent: SkillAgent, title: String, body: String) -> String {
+    let encodedTitle = Data(title.utf8).base64EncodedString()
+    let encodedBody = Data(body.utf8).base64EncodedString()
+    let payload =
+      #"\033]3008;start=\#(agent.rawValue);\#(notifyMetadata(title: encodedTitle, body: encodedBody))\033\\"#
+    return #"printf '\#(payload)' > "$__tty""#
   }
 
   /// Portable awk that extracts one JSON string value from the agent's hook JSON
@@ -258,5 +272,39 @@ public nonisolated enum AgentPresenceOSC {
       + #"__b=$(printf '%s' "$__in" | LC_ALL=C awk -v keys="\#(bodyKeys)" "#
       + #"-v budget=\#(notifyBodyByteBudget) '\#(notifyExtractAwk)' | base64 | tr -d '\n'); "#
       + #"printf '\#(payload)' "$__t" "$__b" > "$__tty""#
+  }
+
+  // MARK: - Stop-hook API-error probe.
+
+  /// Bytes of the transcript tail the Stop-hook probe reads. Bounded so the hook
+  /// stays cheap. Sized well above the largest realistic entry, since a single
+  /// tool-result line can run to tens of kilobytes.
+  static let transcriptTailBytes = 262_144
+
+  /// Scans the transcript JSONL (compact, one object per line, oldest-first) and
+  /// prints `1` when the last message entry for `sid` is an API error: a later
+  /// `type:"user"` or non-error `type:"assistant"` line means the turn moved on.
+  /// An empty `sid` never matches, so a hook payload without `session_id` degrades
+  /// to idle rather than to another session's stale error. Substring matching
+  /// assumes compact JSON; anything else fails to match and yields idle, never a
+  /// spurious error. No single quote, so it survives single-quoting in shell.
+  static let apiErrorScanAwk =
+    #"{if(index($0,"\"isApiErrorMessage\":true")>0){if(sid!=""&&index($0,"\"sessionId\":\"" sid "\"")>0)c=1;next}"#
+    + #"if(index($0,"\"type\":\"user\"")>0){c=0;next}"#
+    + #"if(index($0,"\"type\":\"assistant\"")>0){c=0;next}}"#
+    + #"END{printf "%s",(c?"1":"")}"#
+
+  /// Sets `$__apierr=1` when the current turn ended in an API error. Leaves `$__in`
+  /// set so a following `emitNotifyShell(readsStdin: false)` reuses the one stdin
+  /// read. `awk` and `tail` only, so it works on a bare SSH host.
+  static func stopApiErrorProbeShell() -> String {
+    #"__in=$(cat); "#
+      + #"__tp=$(printf '%s' "$__in" | LC_ALL=C awk -v keys="transcript_path" "#
+      + #"-v budget=4096 '\#(notifyExtractAwk)'); "#
+      + #"__sid=$(printf '%s' "$__in" | LC_ALL=C awk -v keys="session_id" "#
+      + #"-v budget=256 '\#(notifyExtractAwk)'); "#
+      + #"__apierr=""; [ -n "$__tp" ] && [ -f "$__tp" ] && "#
+      + #"__apierr=$(tail -c \#(transcriptTailBytes) "$__tp" 2>/dev/null "#
+      + #"| LC_ALL=C awk -v sid="$__sid" '\#(apiErrorScanAwk)')"#
   }
 }
