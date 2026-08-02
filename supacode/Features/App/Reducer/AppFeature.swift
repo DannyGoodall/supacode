@@ -467,6 +467,12 @@ struct AppFeature {
           await terminalClient.send(.selectTab(worktree, tabID: tabId))
         }
 
+      case .settings(.delegate(.experimentalJJIntegrationChanged)):
+        // The gate flipped at runtime — reload repositories so `classifyRoot`
+        // re-runs with the new value and colocated repos promote/demote
+        // to/from the jj backend (instead of only updating on next launch).
+        return .send(.repositories(.refreshWorktrees))
+
       case .settings(.delegate(.settingsChanged(let settings))):
         let shouldCheckSystemNotificationPermission =
           settings.systemNotificationsEnabled && !state.lastKnownSystemNotificationsEnabled

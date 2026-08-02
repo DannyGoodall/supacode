@@ -193,6 +193,10 @@ public struct SettingsFeature {
     case repositorySettings(RepositorySettingsFeature.Action)
     case addGlobalScript
     case removeGlobalScript(ScriptDefinition.ID)
+    /// The experimental jj-integration gate was toggled at runtime. The gate
+    /// itself is `@Shared` app-storage (read directly by the loader), so this
+    /// only asks the app to re-run repository classification with the new value.
+    case experimentalJJIntegrationChanged
     case alert(PresentationAction<Alert>)
     case delegate(Delegate)
     case binding(BindingAction<State>)
@@ -208,6 +212,9 @@ public struct SettingsFeature {
   @CasePathable
   public enum Delegate: Equatable {
     case settingsChanged(GlobalSettings)
+    /// The experimental jj gate changed; the app should reload repositories so
+    /// classification re-runs (colocated repos promote/demote to/from jj).
+    case experimentalJJIntegrationChanged
   }
 
   @Dependency(AnalyticsClient.self) private var analyticsClient
@@ -544,6 +551,9 @@ public struct SettingsFeature {
         // Globals are always .custom; no kind picker needed.
         state.globalScripts.append(ScriptDefinition(kind: .custom))
         return persist(state)
+
+      case .experimentalJJIntegrationChanged:
+        return .send(.delegate(.experimentalJJIntegrationChanged))
 
       case .removeGlobalScript(let id):
         guard let script = state.globalScripts.first(where: { $0.id == id }) else { return .none }

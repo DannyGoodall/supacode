@@ -67,6 +67,12 @@ struct DeveloperSettingsView: View {
     .padding(.leading, -8)
     .padding(.trailing, -6)
     .navigationTitle("Developer")
+    // The gate is `@Shared` app-storage, so toggling it doesn't re-run the
+    // loader on its own — ask the app to reload repositories so colocated repos
+    // re-classify immediately instead of only on next launch.
+    .onChange(of: experimentalJJIntegration, initial: false) { _, _ in
+      store.send(.experimentalJJIntegrationChanged)
+    }
   }
 }
 

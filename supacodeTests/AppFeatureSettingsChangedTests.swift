@@ -36,6 +36,19 @@ struct AppFeatureSettingsChangedTests {
     await store.finish()
   }
 
+  @Test(.dependencies) func experimentalJJToggleReloadsRepositories() async {
+    let store = TestStore(initialState: AppFeature.State()) {
+      AppFeature()
+    }
+    store.exhaustivity = .off
+
+    // Flipping the gate must re-run repository classification immediately
+    // (otherwise colocated repos only re-classify on next launch).
+    await store.send(.settings(.delegate(.experimentalJJIntegrationChanged)))
+    await store.receive(\.repositories.refreshWorktrees)
+    await store.finish()
+  }
+
   @Test(.dependencies) func togglingAgentPresenceBadgesFansOutClearedSnapshots() async {
     let rootURL = URL(fileURLWithPath: "/tmp/repo")
     let worktree = Worktree(
