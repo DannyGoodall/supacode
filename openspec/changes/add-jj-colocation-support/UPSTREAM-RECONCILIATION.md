@@ -51,8 +51,8 @@ trivial for the maintainer to assess, and to keep each re-merge against a moving
 | Fork remote | `origin` → `github.com/DannyGoodall/supacode` |
 | Upstream remote | `upstream` → `github.com/supabitapp/supacode` |
 | Original branch point | `2df2b75` (`#393` CI restructure) — where the stack first forked |
-| Last reconciled to | `4f33f61c` (upstream `v0.10.5`+) on integration branch `jj-integrate-upstream-0.10.5` (merge `731342c`) — builds + `make test` green (2260 tests). Prior: `v0.10.4` (merge `3af8d0a9`). |
-| Stack size | ~50 jj commits + identity commit + two merge commits |
+| Last reconciled to | `355403d2` (upstream `v0.10.7`) on integration branch `jj-integrate-upstream-0.10.7` (merge `e8471ff2`) — builds + `make test` green (3079 tests). Prior: `v0.10.5`+ (merge `731342c`), `v0.10.4` (merge `3af8d0a9`). |
+| Stack size | ~52 jj commits + identity commit + three merge commits |
 | Published stack branches | `jj-stack-2-backend-read` … `jj-stack-6-native-ui` on `origin` |
 | OpenSpec change | `openspec/changes/add-jj-colocation-support/` |
 
@@ -208,6 +208,30 @@ still leave `make test` broken. Budget for it every cycle:
   path's exact wording and selection semantics unchanged**; upstream asserts them.
 - The "known issues" in the run summary are intentional `withKnownIssue` markers
   — a green run reports them as passing with `xcodebuild` exit 0.
+
+### 4.7 Cycle notes from v0.10.7 (retirements + new anchors)
+
+- **`RepositorySettingsKey` fix retired.** The fork's "SharedKey loads must not
+  republish `settingsFile` on read" fix (`582e2062`) was superseded: upstream's
+  `currentSettings(initialValue:)` never writes on load at all and
+  `loadLocalSettings()` keeps the remote-host guard. The file now resolves
+  **take-theirs wholesale**; the fork carries no delta there anymore. Drop the
+  corresponding commit from the reflow stack.
+- **`.worktreeNotificationReceived` is gone upstream.** The fork's passthrough
+  arm in `RepositoriesFeature.body` listed it; upstream deleted the action.
+  Union the arm from upstream's list + `.pushWorktreeBookmark` only.
+- **`WorktreeRefPickerField` is parameterized.** Upstream generalized the
+  base-ref field into a `title:`/`caption:` reusable (also used for the new
+  Upstream picker, #755). The jj vocabulary now lives at the **base-ref call
+  site** (`WorktreeBaseRefField`), not inside the picker.
+- **Duplicate-worktree paths no longer fail the repo.** Upstream logs, dedupes
+  (`deduplicatedWorktrees`), and keeps loading; `duplicateWorktreePathMessage`
+  survives only for the remote path. Thread `isColocatedJJ` through the
+  dedupe-and-continue result.
+- **New worktree deeplink actions must be unioned in four places:** the
+  `Deeplink.WorktreeAction` enum, the parser switch, the `spawnsShell`
+  classification, and the handler switch — plus the CLI subcommand list.
+  This cycle: fork `.push` + upstream `.appearance` / `.tabRename`.
 
 ### 4.5 Vocabulary / UI conflicts — low risk
 
